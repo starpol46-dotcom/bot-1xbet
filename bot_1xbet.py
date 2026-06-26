@@ -23,9 +23,9 @@ def main() -> None:
     # Ajout de la commande /start
     application.add_handler(CommandHandler("start", start))
 
-    # Lancement du bot
+    #     # Lancement du bot
     print("Le bot démarre sur Render...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
