@@ -2,12 +2,12 @@ import logging
 import os
 import random
 import requests
-import http.server
-import socketserver
-from threading import Thread
+import asyncio
+from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Configuration des logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -15,30 +15,9 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# --- SERVEUR WEB NATIF POUR RENDER ---
-def run_ping_server():
-    class WebHandler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"Bot OK")
-
-    port = int(os.environ.get("PORT", 10000))
-    socketserver.TCPServer.allow_reuse_address = True
-    try:
-        with socketserver.TCPServer(("0.0.0.0", port), WebHandler) as httpd:
-            logging.info(f"Serveur de secours actif sur le port {port}")
-            httpd.serve_forever()
-    except Exception as e:
-        logging.error(f"Erreur serveur web : {e}")
-
-Thread(target=run_ping_server, daemon=True).start()
-# -------------------------------------
-
+# --- RECUPERATION DES VRAIS MATCHS ---
 def recuperer_vrais_matchs():
     try:
-        # Requête sur une API publique ouverte
         url = "https://api.open-ligadb.de/getmatchdata/bl1/2025"
         response = requests.get(url, timeout=10)
         
@@ -58,13 +37,13 @@ def recuperer_vrais_matchs():
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des matchs : {e}")
     
-    # Secours si l'API externe ne répond pas
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga (Secours)"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League (Secours)"},
         {"home": "Bayern Munich", "away": "Dortmund", "league": "Bundesliga (Secours)"}
     ]
 
+# --- COMMANDES TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
@@ -121,13 +100,37 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             await update.message.reply_text(message_match, parse_mode="Markdown")
 
-def main():
+# --- MINI-SERVEUR ASYNC ---
+async def handle_ping(request):
+    return web.Response(text="Bot en ligne")
+
+async def main():
+    # Configuration du serveur Web aiohttp
+    web_app = web.Application()
+    web_app.router.add_get('/', handle_ping)
+    
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logging.info(f"Serveur Web de ping actif sur le port {port}")
+
+    # Initialisation du bot Telegram
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
     
-    print("Démarrage du polling Telegram...")
-    application.run_polling()
+    # Lancement combiné et propre
+    async with application:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        logging.info("Polling Telegram démarré.")
+        
+        # Maintient l'application ouverte indéfiniment
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == '__main__':
-    main()
+    asyncio.run(main())
