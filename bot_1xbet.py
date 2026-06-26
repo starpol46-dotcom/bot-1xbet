@@ -9,7 +9,11 @@ logging.basicConfig(
 )
 
 # Ton token exact validé par Telegram
-TOKEN = "8968865656:AAFeQ8dI5iEG5xtwI701TjcdVRPi_t6h8Js"
+TOKEN = import os
+
+# Ce code va lire le token directement depuis la mémoire de Render
+TOKEN = os.environ.get("TELEGRAM_TOKEN")
+
 
 # 2. Fonction déclenchée par /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
