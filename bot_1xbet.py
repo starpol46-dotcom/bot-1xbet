@@ -1,4 +1,5 @@
 import logging
+import os  # L'import est maintenant seul sur sa ligne
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -8,12 +9,8 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Ton token exact validé par Telegram
-TOKEN = import os
-
-# Ce code va lire le token directement depuis la mémoire de Render
+# On récupère le token masqué enregistré dans l'onglet Environment de Render
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
 
 # 2. Fonction déclenchée par /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -34,14 +31,12 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if texte_recu == "📊 Analyser les matchs du jour":
         await update.message.reply_text("🔄 Connexion aux bases de données... Analyse quantitative en cours...")
         
-        # --- EXEMPLE DE LOGIQUE DE CALCUL DE VALUE (CRITÈRE EXPERT) ---
+        # --- LOGIQUE DE CALCUL DE VALUE MATCH MATHÉMATIQUE ---
         match = "Japan vs Sweden"
         
-        # Simulation d'un calcul basé sur la Loi de Poisson (Ex: 58% de chances que les deux équipes marquent)
+        # Exemple basé sur la distribution de Poisson (58% de probabilité pour le BTTS)
         probabilite_btts = 0.58  
-        
-        # Cote théorique minimale pour que ce soit rentable : 1 / 0.58 = 1.72
-        cote_1xbet = 1.95  # Exemple de cote affichée chez le bookmaker
+        cote_1xbet = 1.95  # Exemple de cote du bookmaker
         
         # Formule mathématique de la Value : (Probabilité * Cote) - 1
         value = (probabilite_btts * cote_1xbet) - 1
@@ -65,7 +60,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 # 4. Fonction principale de lancement
 def main() -> None:
-    # Initialisation de l'application
+    # Initialisation de l'application avec le TOKEN sécurisé
     application = Application.builder().token(TOKEN).build()
 
     # Gestionnaire pour la commande /start
@@ -74,7 +69,7 @@ def main() -> None:
     # Gestionnaire pour intercepter le texte du bouton d'analyse
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
     
-    # Lancement du polling propre
+    # Lancement du bot
     print("Le bot démarre sur Render...")
     application.run_polling()
 
