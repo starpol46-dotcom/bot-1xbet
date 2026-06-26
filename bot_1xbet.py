@@ -5,7 +5,6 @@ import requests
 import http.server
 import socketserver
 from threading import Thread
-from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -16,7 +15,7 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# --- SERVEUR WEB NATIF ET LÉGER POUR RÉPONDRE AU PORT DE RENDER ---
+# --- SERVEUR WEB NATIF POUR RENDER ---
 def run_ping_server():
     class WebHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -26,18 +25,20 @@ def run_ping_server():
             self.wfile.write(b"Bot OK")
 
     port = int(os.environ.get("PORT", 10000))
-    # Permet de libérer le port immédiatement en cas de redémarrage
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("0.0.0.0", port), WebHandler) as httpd:
-        logging.info(f"Serveur de secours actif sur le port {port}")
-        httpd.serve_forever()
+    try:
+        with socketserver.TCPServer(("0.0.0.0", port), WebHandler) as httpd:
+            logging.info(f"Serveur de secours actif sur le port {port}")
+            httpd.serve_forever()
+    except Exception as e:
+        logging.error(f"Erreur serveur web : {e}")
 
-# Lancement immédiat dans un thread séparé pour ne pas bloquer Telegram
 Thread(target=run_ping_server, daemon=True).start()
-# ------------------------------------------------------------------
+# -------------------------------------
 
 def recuperer_vrais_matchs():
     try:
+        # Requête sur une API publique ouverte
         url = "https://api.open-ligadb.de/getmatchdata/bl1/2025"
         response = requests.get(url, timeout=10)
         
@@ -57,6 +58,7 @@ def recuperer_vrais_matchs():
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des matchs : {e}")
     
+    # Secours si l'API externe ne répond pas
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga (Secours)"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League (Secours)"},
@@ -94,9 +96,9 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             avg_cartons = round(random.uniform(3.8, 5.2), 1)
             
             options_valides = [
-                {"nom": "1N2 (Victoire locale)", "prob": prob_1, "desc": f"L'indice de performance récente à domicile de {m['home']} est supérieur de 18%."},
-                {"nom": "BTTS (Les deux marquent)", "prob": prob_btts_oui, "desc": f"Historique offensif validé : les deux clubs ont marqué lors de leurs 4 derniers matchs respectifs."},
-                {"nom": "Plus de 2.5 Buts", "prob": prob_over_25, "desc": "La moyenne de buts combinée des deux équipes cette saison dépasse le seuil algorithmique de 2.8."}
+                {"nom": "1N2 (Victoire locale)", "prob": prob_1, "desc": f"L'indice de performance récente à domicile de {m['home']} est supérieur."},
+                {"nom": "BTTS (Les deux marquent)", "prob": prob_btts_oui, "desc": "Historique offensif validé : les deux clubs ont marqué régulièrement sur leurs derniers matchs."},
+                {"nom": "Plus de 2.5 Buts", "prob": prob_over_25, "desc": "La moyenne de buts combinée des deux équipes cette saison dépasse le seuil algorithmique de 2.5."}
             ]
             
             recommandation = max(options_valides, key=lambda x: x["prob"])
@@ -108,7 +110,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• *1N2 :* {m['home']} ({prob_1}%) | Nul ({prob_N}%) | {m['away']} ({prob_2}%)\n"
                 f"• *Scores Exacts probables :* {', '.join(scores_probables)}\n"
                 f"• *Les deux équipes marquent :* Oui ({prob_btts_oui}%) | Non ({100 - prob_btts_oui}%)\n"
-                f"• *Total Buts :* Plus de 2.5 ({prob_over_25}%) | Moins de 2.5 ({100 - ... if type(prob_over_25) == int else 0}%)\n"
+                f"• *Total Buts :* Plus de 2.5 ({prob_over_25}%) | Moins de 2.5 ({100 - prob_over_25}%)\n"
                 f"• *Corners (Moyenne estimée) :* Plus de {avg_corners - 1:.0f}.5 ({random.randint(62,74)}%)\n"
                 f"• *Cartons Jaunes :* Proche de {avg_cartons:.1f} par match\n\n"
                 f"⚡ *RECOMMANDATION DE L'IA :*\n"
