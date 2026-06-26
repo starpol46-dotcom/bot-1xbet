@@ -2,13 +2,13 @@ import logging
 import os
 import random
 import requests
-from datetime import datetime
-from flask import Flask
+import http.server
+import socketserver
 from threading import Thread
+from datetime import datetime
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configuration des logs
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -16,22 +16,25 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# --- MINI SERVEUR POUR CORRIGER L'ERREUR RENDER ---
-app = Flask('')
+# --- SERVEUR WEB NATIF ET LÉGER POUR RÉPONDRE AU PORT DE RENDER ---
+def run_ping_server():
+    class WebHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"Bot OK")
 
-@app.route('/')
-def home():
-    return "Bot en cours d'exécution !"
-
-def run_flask():
-    # Render attribue automatiquement un port dans les variables d'environnement
     port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    # Permet de libérer le port immédiatement en cas de redémarrage
+    socketserver.TCPServer.allow_reuse_address = True
+    with socketserver.TCPServer(("0.0.0.0", port), WebHandler) as httpd:
+        logging.info(f"Serveur de secours actif sur le port {port}")
+        httpd.serve_forever()
 
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
-# --------------------------------------------------
+# Lancement immédiat dans un thread séparé pour ne pas bloquer Telegram
+Thread(target=run_ping_server, daemon=True).start()
+# ------------------------------------------------------------------
 
 def recuperer_vrais_matchs():
     try:
@@ -46,7 +49,7 @@ def recuperer_vrais_matchs():
                 matchs_reels.append({
                     "home": match.get("team1", {}).get("teamName", "Équipe Domicile"),
                     "away": match.get("team2", {}).get("teamName", "Équipe Extérieur"),
-                    "league": "Championnat Majeur"
+                    "league": "Bundesliga"
                 })
             
             if matchs_reels:
@@ -105,7 +108,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• *1N2 :* {m['home']} ({prob_1}%) | Nul ({prob_N}%) | {m['away']} ({prob_2}%)\n"
                 f"• *Scores Exacts probables :* {', '.join(scores_probables)}\n"
                 f"• *Les deux équipes marquent :* Oui ({prob_btts_oui}%) | Non ({100 - prob_btts_oui}%)\n"
-                f"• *Total Buts :* Plus de 2.5 ({prob_over_25}%) | Moins de 2.5 ({100 - prob_over_25}%)\n"
+                f"• *Total Buts :* Plus de 2.5 ({prob_over_25}%) | Moins de 2.5 ({100 - ... if type(prob_over_25) == int else 0}%)\n"
                 f"• *Corners (Moyenne estimée) :* Plus de {avg_corners - 1:.0f}.5 ({random.randint(62,74)}%)\n"
                 f"• *Cartons Jaunes :* Proche de {avg_cartons:.1f} par match\n\n"
                 f"⚡ *RECOMMANDATION DE L'IA :*\n"
@@ -116,15 +119,12 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             await update.message.reply_text(message_match, parse_mode="Markdown")
 
-def main() -> None:
-    # On lance le serveur web de secours juste avant de démarrer le bot Telegram
-    keep_alive()
-    
+def main():
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
     
-    print("Le bot démarre...")
+    print("Démarrage du polling Telegram...")
     application.run_polling()
 
 if __name__ == '__main__':
