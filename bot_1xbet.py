@@ -14,7 +14,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 def main() -> None:
     # Ton token Telegram exact
-    TOKEN = "8968865656:AAFeQ8dI5iEG5xtwI701TjcdVRPi_t6h8Js"
+    TOKEN = "8968865656:AAFeQ8dI5iEG5xtwI7O1TjcdVRPi_t6h8Js"
+
     
     # Création de l'application (sans proxy !)
     application = Application.builder().token(TOKEN).build()
