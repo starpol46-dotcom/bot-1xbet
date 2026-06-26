@@ -3,6 +3,8 @@ import os
 import random
 import requests
 from datetime import datetime
+from flask import Flask
+from threading import Thread
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -14,22 +16,33 @@ logging.basicConfig(
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-# Fonction pour récupérer les vrais matchs du jour via une source publique
+# --- MINI SERVEUR POUR CORRIGER L'ERREUR RENDER ---
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Bot en cours d'exécution !"
+
+def run_flask():
+    # Render attribue automatiquement un port dans les variables d'environnement
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.start()
+# --------------------------------------------------
+
 def recuperer_vrais_matchs():
     try:
-        # On intercepte la date du jour au format AAAAMMJJ
-        date_aujourdhui = datetime.now().strftime("%Y-%m-%d")
-        
-        # Utilisation d'une API de secours publique pour récupérer le calendrier réel du jour
-        url = f"https://api.open-ligadb.de/getmatchdata/bl1/2025" # Exemple de flux public stable
+        url = "https://api.open-ligadb.de/getmatchdata/bl1/2025"
         response = requests.get(url, timeout=10)
         
         if response.status_code == 200:
             donnees = response.json()
             matchs_reels = []
             
-            # On extrait les vraies équipes des données reçues
-            for match in donnees[:3]: # On prend un maximum de 3 matchs réels
+            for match in donnees[:3]:
                 matchs_reels.append({
                     "home": match.get("team1", {}).get("teamName", "Équipe Domicile"),
                     "away": match.get("team2", {}).get("teamName", "Équipe Extérieur"),
@@ -41,14 +54,12 @@ def recuperer_vrais_matchs():
     except Exception as e:
         logging.error(f"Erreur lors de la récupération des matchs : {e}")
     
-    # Si le flux public a un ralentissement, on garde une sécurité pour éviter que le bot plante
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga (Secours)"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League (Secours)"},
         {"home": "Bayern Munich", "away": "Dortmund", "league": "Bundesliga (Secours)"}
     ]
 
-# Fonction /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
@@ -59,18 +70,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         reply_markup=reply_markup
     )
 
-# Fonction d'analyse
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     texte_recu = update.message.text
 
     if texte_recu == "📊 Analyser les matchs du jour":
         await update.message.reply_text("📡 Connexion aux serveurs distants... Extraction des vrais matchs en cours...")
         
-        # Récupération des vrais matchs
         matchs_du_jour = recuperer_vrais_matchs()
         
         for idx, m in enumerate(matchs_du_jour, 1):
-            # --- ALGORITHME MATHÉMATIQUE DE SÉCURITÉ ---
             prob_1 = random.randint(38, 54)
             prob_N = random.randint(22, 28)
             prob_2 = 100 - prob_1 - prob_N
@@ -109,6 +117,9 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(message_match, parse_mode="Markdown")
 
 def main() -> None:
+    # On lance le serveur web de secours juste avant de démarrer le bot Telegram
+    keep_alive()
+    
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
