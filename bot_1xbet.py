@@ -14,11 +14,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Nettoyage strict des variables d'environnement pour éliminer les retours à la ligne (\n) invisibles du copier-coller
+# Nettoyage strict initial des variables d'environnement
 def nettoyer_variable(nom_variable):
     valeur = os.environ.get(nom_variable)
     if valeur:
-        # Supprime les espaces, les retours à la ligne et les tabulations masqués
         return valeur.replace('\n', '').replace('\r', '').strip()
     return None
 
@@ -66,7 +65,7 @@ def recuperer_vrais_matchs():
         except Exception as e:
             logging.error(f"Erreur API-Football : {e}")
     
-    # Liste alternative s'il n'y a pas de matchs aujourd'hui
+    # Liste alternative de secours
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League"},
@@ -139,6 +138,9 @@ async def main():
         logging.critical("Erreur fatale : TELEGRAM_TOKEN non configuré.")
         return
 
+    # SÉCURITÉ RADICALE : Élimine absolument tout espace ou retour à la ligne résiduel
+    token_propre = "".join(TOKEN.split())
+
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
@@ -149,8 +151,8 @@ async def main():
     await site.start()
     logging.info(f"Serveur Web actif sur le port {port}")
 
-    # Initialisation sécurisée
-    application = Application.builder().token(TOKEN).build()
+    # Initialisation de l'application Telegram avec le jeton nettoyé à 100%
+    application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
     
