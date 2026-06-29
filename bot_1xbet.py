@@ -3,6 +3,7 @@ import os
 import random
 import requests
 import asyncio
+from datetime import datetime
 from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -13,32 +14,57 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Sécurisation du Token : .strip() supprime les espaces et retours à la ligne (\n) invisibles
+# Sécurisation des variables d'environnement (suppression des espaces et \n invisibles)
 TOKEN_ENV = os.environ.get("TELEGRAM_TOKEN")
 TOKEN = TOKEN_ENV.strip() if TOKEN_ENV else None
 
+API_KEY_ENV = os.environ.get("API_FOOTBALL_KEY")
+API_FOOTBALL_KEY = API_KEY_ENV.strip() if API_KEY_ENV else None
+
 # --- RECUPERATION DES VRAIS MATCHS ---
 def recuperer_vrais_matchs():
-    try:
-        url = "https://api.open-ligadb.de/getmatchdata/bl1/2025"
-        response = requests.get(url, timeout=10)
-        
-        if response.status_code == 200:
-            donnees = response.json()
-            matchs_reels = []
+    if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
+        logging.warning("Clé API-Football non configurée ou par défaut.")
+    else:
+        try:
+            aujourd_hui = datetime.now().strftime('%Y-%m-%d')
+            url = f"https://v3.football.api-sports.io/fixtures?date={aujourd_hui}"
+            headers = {
+                'x-rapidapi-key': API_FOOTBALL_KEY,
+                'x-rapidapi-host': 'v3.football.api-sports.io'
+            }
+            # Le timeout évite que le bot reste bloqué si l'API est lente
+            response = requests.get(url, headers=headers, timeout=10)
             
-            for match in donnees[:3]:
-                matchs_reels.append({
-                    "home": match.get("team1", {}).get("teamName", "Équipe Domicile"),
-                    "away": match.get("team2", {}).get("teamName", "Équipe Extérieur"),
-                    "league": "Bundesliga"
-                })
-            
-            if matchs_reels:
-                return matchs_reels
-    except Exception as e:
-        logging.error(f"Erreur lors de la récupération des matchs : {e}")
+            if response.status_code == 200:
+                donnees = response.json()
+                matchs = donnees.get("response", [])
+                
+                matchs_reels = []
+                for m in matchs:
+                    ligue = m.get("league", {}).get("name", "")
+                    # Sélection des championnats principaux
+                    if ligue in ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "UEFA Champions League"]:
+                        matchs_reels.append({
+                            "home": m.get("teams", {}).get("home", {}).get("name", "Équipe Domicile"),
+                            "away": m.get("teams", {}).get("away", {}).get("name", "Équipe Extérieur"),
+                            "league": ligue
+                        })
+                
+                if not matchs_reels and matchs:
+                    for m in matchs[:3]:
+                        matchs_reels.append({
+                            "home": m.get("teams", {}).get("home", {}).get("name", "Équipe Domicile"),
+                            "away": m.get("teams", {}).get("away", {}).get("name", "Équipe Extérieur"),
+                            "league": m.get("league", {}).get("name", "Inconnue")
+                        })
+                        
+                if matchs_reels:
+                    return matchs_reels[:3]
+        except Exception as e:
+            logging.error(f"Erreur API-Football : {e}")
     
+    # Matchs réels alternatifs si l'API ne donne rien
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League"},
@@ -111,7 +137,6 @@ async def main():
         logging.critical("Erreur fatale : TELEGRAM_TOKEN non configuré.")
         return
 
-    # Configuration du serveur Web aiohttp pour Render
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
@@ -122,7 +147,6 @@ async def main():
     await site.start()
     logging.info(f"Serveur Web actif sur le port {port}")
 
-    # Initialisation de l'application Telegram
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
@@ -130,10 +154,8 @@ async def main():
     async with application:
         await application.initialize()
         await application.start()
-        
-        # AJOUT CRITIQUE : drop_pending_updates=True supprime les anciens blocages de webhook Telegram
         await application.updater.start_polling(drop_pending_updates=True)
-        logging.info("Polling Telegram démarré (mises à jour purgées).")
+        logging.info("Polling Telegram démarré.")
         
         while True:
             await asyncio.sleep(3600)
