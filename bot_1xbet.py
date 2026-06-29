@@ -13,7 +13,9 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-TOKEN = os.environ.get("TELEGRAM_TOKEN")
+# Sécurisation du Token : .strip() supprime les espaces et retours à la ligne (\n) invisibles
+TOKEN_ENV = os.environ.get("TELEGRAM_TOKEN")
+TOKEN = TOKEN_ENV.strip() if TOKEN_ENV else None
 
 # --- RECUPERATION DES VRAIS MATCHS ---
 def recuperer_vrais_matchs():
@@ -128,9 +130,10 @@ async def main():
     async with application:
         await application.initialize()
         await application.start()
+        
+        # AJOUT CRITIQUE : drop_pending_updates=True supprime les anciens blocages de webhook Telegram
         await application.updater.start_polling(drop_pending_updates=True)
-
-        logging.info("Polling Telegram démarré.")
+        logging.info("Polling Telegram démarré (mises à jour purgées).")
         
         while True:
             await asyncio.sleep(3600)
