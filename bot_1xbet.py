@@ -128,7 +128,8 @@ async def main():
     async with application:
         await application.initialize()
         await application.start()
-        await application.updater.start_polling()
+        await application.updater.start_polling(drop_pending_updates=True)
+
         logging.info("Polling Telegram démarré.")
         
         while True:
