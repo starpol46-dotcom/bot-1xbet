@@ -14,17 +14,21 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# Sécurisation des variables d'environnement (suppression des espaces et \n invisibles)
-TOKEN_ENV = os.environ.get("TELEGRAM_TOKEN")
-TOKEN = TOKEN_ENV.strip() if TOKEN_ENV else None
+# Nettoyage strict des variables d'environnement pour éliminer les retours à la ligne (\n) invisibles du copier-coller
+def nettoyer_variable(nom_variable):
+    valeur = os.environ.get(nom_variable)
+    if valeur:
+        # Supprime les espaces, les retours à la ligne et les tabulations masqués
+        return valeur.replace('\n', '').replace('\r', '').strip()
+    return None
 
-API_KEY_ENV = os.environ.get("API_FOOTBALL_KEY")
-API_FOOTBALL_KEY = API_KEY_ENV.strip() if API_KEY_ENV else None
+TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
+API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 
 # --- RECUPERATION DES VRAIS MATCHS ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
-        logging.warning("Clé API-Football non configurée ou par défaut.")
+        logging.warning("Clé API-Football non configurée. Passage aux matchs par défaut.")
     else:
         try:
             aujourd_hui = datetime.now().strftime('%Y-%m-%d')
@@ -33,7 +37,6 @@ def recuperer_vrais_matchs():
                 'x-rapidapi-key': API_FOOTBALL_KEY,
                 'x-rapidapi-host': 'v3.football.api-sports.io'
             }
-            # Le timeout évite que le bot reste bloqué si l'API est lente
             response = requests.get(url, headers=headers, timeout=10)
             
             if response.status_code == 200:
@@ -43,7 +46,6 @@ def recuperer_vrais_matchs():
                 matchs_reels = []
                 for m in matchs:
                     ligue = m.get("league", {}).get("name", "")
-                    # Sélection des championnats principaux
                     if ligue in ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "UEFA Champions League"]:
                         matchs_reels.append({
                             "home": m.get("teams", {}).get("home", {}).get("name", "Équipe Domicile"),
@@ -64,7 +66,7 @@ def recuperer_vrais_matchs():
         except Exception as e:
             logging.error(f"Erreur API-Football : {e}")
     
-    # Matchs réels alternatifs si l'API ne donne rien
+    # Liste alternative s'il n'y a pas de matchs aujourd'hui
     return [
         {"home": "Real Madrid", "away": "FC Barcelone", "league": "La Liga"},
         {"home": "Manchester City", "away": "Liverpool", "league": "Premier League"},
@@ -147,6 +149,7 @@ async def main():
     await site.start()
     logging.info(f"Serveur Web actif sur le port {port}")
 
+    # Initialisation sécurisée
     application = Application.builder().token(TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
