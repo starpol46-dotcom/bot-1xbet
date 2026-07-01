@@ -3,7 +3,7 @@ import os
 import math
 import requests
 import asyncio
-from datetime import datetime
+import datetime as dt
 from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -103,7 +103,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
         "recommandation": recommandation
     }
 
-# --- FILTRE ET EXTRACTION DYNAMIQUE DES 7 PROCHAINS MATCHS RÉELS ---
+# --- FILTRE ET EXTRACTION DYNAMIQUE DES 7 MATCHS RÉELS (SCAN SUR 3 JOURS) ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -113,39 +113,43 @@ def recuperer_vrais_matchs():
         'x-rapidapi-key': API_FOOTBALL_KEY,
         'x-rapidapi-host': 'v3.football.api-sports.io'
     }
-    saison = 2025
     
     try:
-        # On demande en priorité absolue les 7 prochains matchs programmés de la Coupe du Monde (League 1)
-        url = f"https://v3.football.api-sports.io/fixtures?league=1&season={saison}&next=7"
-        response = requests.get(url, headers=headers, timeout=10).json()
-        matchs = response.get("response", [])
+        matchs_reels = []
         
-        # Si la Coupe du Monde n'a pas d'événement immédiat, on pioche dans les ligues majeures actives
-        if not matchs:
-            url = f"https://v3.football.api-sports.io/fixtures?season={saison}&next=20"
+        # Le script scanne aujourd'hui (J+0), demain (J+1) et après-demain (J+2) pour trouver les vrais matchs
+        for i in range(3):
+            date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+            url = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
+            
             response = requests.get(url, headers=headers, timeout=10).json()
             matchs = response.get("response", [])
-
-        matchs_reels = []
-        for m in matchs:
-            ligue = m.get("league", {}).get("name", "")
-            matchs_reels.append({
-                "home": m.get("teams", {}).get("home", {}).get("name"),
-                "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                "away": m.get("teams", {}).get("away", {}).get("name"),
-                "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                "league": ligue
-            })
-            # On stoppe la boucle dès qu'on a réuni nos 7 fiches de matchs
+            
+            for m in matchs:
+                ligue = m.get("league", {}).get("name", "")
+                statut = m.get("fixture", {}).get("status", {}).get("short", "")
+                
+                # Capture de la Coupe du Monde (World Cup) ou des compétitions majeures
+                if "World Cup" in ligue or ligue in ["Friendlies", "Copa America", "Euro", "UEFA Champions League"]:
+                    if statut in ["NS", "TBD"]:  # Uniquement les matchs non commencés
+                        matchs_reels.append({
+                            "home": m.get("teams", {}).get("home", {}).get("name"),
+                            "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                            "away": m.get("teams", {}).get("away", {}).get("name"),
+                            "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                            "league": ligue
+                        })
+                
+                if len(matchs_reels) >= 7:
+                    break
             if len(matchs_reels) >= 7:
                 break
-                
+
         if matchs_reels:
             return matchs_reels
             
     except Exception as e:
-        logging.error(f"Erreur lors de la récupération des matchs réels : {e}")
+        logging.error(f"Erreur lors de la récupération par date globale : {e}")
         
     return obtenir_matchs_secours()
 
@@ -166,7 +170,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
         "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
-        "Filtres actifs : Volume étendu (7 matchs), Matrice de Poisson 0-7 buts, Modélisation xG & Détection de Value.",
+        "Filtres actifs : Volume étendu (7 matchs), Matrice globale Poisson (0-7 buts), Scan Coupe du Monde actif.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
@@ -200,7 +204,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             await update.message.reply_text(message_match, parse_mode="Markdown")
-            await asyncio.sleep(1) # Petit délai pour éviter que Telegram ne bloque l'envoi massif de messages
+            await asyncio.sleep(1)  # Pause d'une seconde pour éviter les restrictions de Telegram
 
 async def handle_ping(request):
     return web.Response(text="Bot en ligne")
