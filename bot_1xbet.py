@@ -28,7 +28,7 @@ def probabilite_poisson(k, laambda):
     if laambda <= 0: laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- MOTEUR DE CALCUL EXPERT (POISSON + xG ESTIMÉS + VALUE) ---
+# --- MOTEUR DE CALCUL EXPERT EN MATRICE ÉTENDUE (0 À 7 BUTS) ---
 def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
     url = "https://v3.football.api-sports.io/teams/statistics"
     headers = {
@@ -37,11 +37,10 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
     }
     saison = 2025
     
-    # Valeurs de base par défaut
+    # Valeurs moyennes de base stables pour le modèle xG
     lambda_home = 1.55  
     mu_away = 1.15
     
-    # Si les IDs sont valides, on tente d'affiner avec l'API
     if team_home_id and team_away_id and API_FOOTBALL_KEY:
         try:
             res_home = requests.get(f"{url}?league=39&season={saison}&team={team_home_id}", headers=headers, timeout=5).json()
@@ -60,8 +59,9 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
     prob_over_25 = 0.0
     scores = {}
     
-    for h in range(6):
-        for a in range(6):
+    # MATRICE ÉTENDUE : Analyse de 0 à 7 buts par équipe (range(8))
+    for h in range(8):
+        for a in range(8):
             p_h = probabilite_poisson(h, lambda_home)
             p_a = probabilite_poisson(a, mu_away)
             p_score = p_h * p_a
@@ -103,59 +103,77 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
         "recommandation": recommandation
     }
 
-# --- SÉLECTION DES VRAIS MATCHS DE L'API ---
+# --- FILTRE ET EXTRACTION DYNAMIQUE DES 7 PROCHAINS MATCHS RÉELS ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
-    else:
-        try:
-            aujourd_hui = datetime.now().strftime('%Y-%m-%d')
-            url = f"https://v3.football.api-sports.io/fixtures?date={aujourd_hui}"
-            headers = {
-                'x-rapidapi-key': API_FOOTBALL_KEY,
-                'x-rapidapi-host': 'v3.football.api-sports.io'
-            }
+        return obtenir_matchs_secours()
+        
+    headers = {
+        'x-rapidapi-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
+    saison = 2025
+    
+    try:
+        # On demande en priorité absolue les 7 prochains matchs programmés de la Coupe du Monde (League 1)
+        url = f"https://v3.football.api-sports.io/fixtures?league=1&season={saison}&next=7"
+        response = requests.get(url, headers=headers, timeout=10).json()
+        matchs = response.get("response", [])
+        
+        # Si la Coupe du Monde n'a pas d'événement immédiat, on pioche dans les ligues majeures actives
+        if not matchs:
+            url = f"https://v3.football.api-sports.io/fixtures?season={saison}&next=20"
             response = requests.get(url, headers=headers, timeout=10).json()
             matchs = response.get("response", [])
+
+        matchs_reels = []
+        for m in matchs:
+            ligue = m.get("league", {}).get("name", "")
+            matchs_reels.append({
+                "home": m.get("teams", {}).get("home", {}).get("name"),
+                "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                "away": m.get("teams", {}).get("away", {}).get("name"),
+                "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                "league": ligue
+            })
+            # On stoppe la boucle dès qu'on a réuni nos 7 fiches de matchs
+            if len(matchs_reels) >= 7:
+                break
+                
+        if matchs_reels:
+            return matchs_reels
             
-            matchs_reels = []
-            for m in matchs:
-                ligue = m.get("league", {}).get("name", "")
-                # AJOUT CRUCIAL : Inclusion de la "World Cup" pour capter les matchs internationaux
-                if ligue in ["Premier League", "La Liga", "Serie A", "Bundesliga", "Ligue 1", "UEFA Champions League", "World Cup"]:
-                    matchs_reels.append({
-                        "home": m.get("teams", {}).get("home", {}).get("name"),
-                        "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                        "away": m.get("teams", {}).get("away", {}).get("name"),
-                        "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                        "league": ligue
-                    })
-            if matchs_reels:
-                return matchs_reels[:3]
-        except Exception as e:
-            logging.error(f"Erreur API-Football : {e}")
-            
-    # Secours parfaitement sécurisé (IDs valides et distincts)
+    except Exception as e:
+        logging.error(f"Erreur lors de la récupération des matchs réels : {e}")
+        
+    return obtenir_matchs_secours()
+
+def obtenir_matchs_secours():
     return [
         {"home": "Real Madrid", "home_id": 541, "away": "FC Barcelone", "away_id": 529, "league": "La Liga"},
         {"home": "Manchester City", "home_id": 50, "away": "Liverpool", "away_id": 40, "league": "Premier League"},
-        {"home": "Bayern Munich", "home_id": 157, "away": "Dortmund", "away_id": 165, "league": "Bundesliga"}
+        {"home": "Bayern Munich", "home_id": 157, "away": "Dortmund", "away_id": 165, "league": "Bundesliga"},
+        {"home": "Paris SG", "home_id": 85, "away": "Marseille", "away_id": 81, "league": "Ligue 1"},
+        {"home": "Juventus", "home_id": 496, "away": "Inter Milan", "away_id": 505, "league": "Serie A"},
+        {"home": "Arsenal", "home_id": 42, "away": "Chelsea", "away_id": 49, "league": "Premier League"},
+        {"home": "Atletico Madrid", "home_id": 530, "away": "FC Valence", "away_id": 532, "league": "La Liga"}
     ]
 
-# --- COMMANDES DE L'INTERFACE TELEGRAM ---
+# --- INTERFACE TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
-        "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Expert.*\n\n"
-        "Filtres actifs : Grands championnats & World Cup, Modélisation xG, Loi de Poisson & Détection de Value.",
+        "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
+        "Filtres actifs : Volume étendu (7 matchs), Matrice de Poisson 0-7 buts, Modélisation xG & Détection de Value.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation en cours... Tri des niches (World Cup incluse), génération des matrices xG...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Analyse des 7 prochaines grosses affiches réelles...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
@@ -164,14 +182,14 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             rec = res["recommandation"]
 
             message_match = (
-                f"⚔️ *MATCH {idx}/3 : {m['home']} vs {m['away']}*\n"
+                f"⚔️ *MATCH {idx}/{len(matchs_du_jour)} : {m['home']} vs {m['away']}*\n"
                 f"🏆 Compétition : {m['league']}\n\n"
-                f"📈 *Probabilités et Cotes Théoriques (Loi de Poisson) :*\n"
+                f"📈 *Probabilités et Cotes Théoriques (Poisson 0-7 Buts) :*\n"
                 f"• *1 :* {res['p1']}% (Cote juste : {res['cote_th1']})\n"
                 f"• *N :* {res['pN']}% (Cote juste : {res['cote_thN']})\n"
                 f"• *2 :* {res['p2']}% (Cote juste : {res['cote_th2']})\n\n"
-                f"🎯 *Métriques Offensives Avancées :*\n"
-                f"• *Modèle xG Scores Exacts :* {', '.join(res['scores'])}\n"
+                f"🎯 *Métriques Offensives Avancées (Modèle xG) :*\n"
+                f"• *Top Scores Exacts :* {', '.join(res['scores'])}\n"
                 f"• *Les deux marquent :* Oui ({res['btts']}%) | Non ({100 - res['btts']}%)\n"
                 f"• *Total Buts :* Plus de 2.5 ({res['over25']}%)\n\n"
                 f"💎 *FILTRE DE VALUE DETECTÉE :*\n"
@@ -182,6 +200,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             await update.message.reply_text(message_match, parse_mode="Markdown")
+            await asyncio.sleep(1) # Petit délai pour éviter que Telegram ne bloque l'envoi massif de messages
 
 async def handle_ping(request):
     return web.Response(text="Bot en ligne")
