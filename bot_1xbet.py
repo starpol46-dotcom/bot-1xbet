@@ -36,9 +36,11 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         'x-rapidapi-host': 'v3.football.api-sports.io'
     }
     
-    # Calcul de la saison dynamique
-    date_obj = dt.datetime.strptime(date_match.split('T')[0], '%Y-%m-%d')
-    saison = date_obj.year if league_id in [1, 4] else (date_obj.year - 1 if date_obj.month < 7 else date_obj.year)
+    try:
+        date_obj = dt.datetime.strptime(date_match.split('T')[0], '%Y-%m-%d')
+        saison = date_obj.year
+    except:
+        saison = 2026
     
     lambda_home = 1.45  
     mu_away = 1.05
@@ -110,7 +112,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "recommandation": recommendation
     }
 
-# --- FILTRE ET EXTRACTION SÉCURISÉE DES VRAIS MATCHS A VENIR ---
+# --- RECHERCHE LARGE (NS + TBD + DEUX STRATÉGIES DE CAPTURE) ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -123,32 +125,63 @@ def recuperer_vrais_matchs():
     
     matchs_reels = []
     
-    # Correction : Requête directe sur la Coupe du Monde (ID 1) pour la saison 2026, statut non démarré (NS)
+    # Stratégie A : Recherche par statut large (NS et TBD) pour la Coupe du Monde (ID 1)
     try:
-        url = "https://v3.football.api-sports.io/fixtures?league=1&season=2026&status=NS"
+        url = "https://v3.football.api-sports.io/fixtures?league=1&season=2026"
         response = requests.get(url, headers=headers, timeout=10).json()
         matchs = response.get("response", [])
         
         for m in matchs:
-            matchs_reels.append({
-                "home": m.get("teams", {}).get("home", {}).get("name"),
-                "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                "away": m.get("teams", {}).get("away", {}).get("name"),
-                "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                "league": m.get("league", {}).get("name", ""),
-                "league_id": 1,
-                "date": m.get("fixture", {}).get("date")
-            })
-            
-            # Limite à 5 affiches réelles pour éviter de saturer Telegram
-            if len(matchs_reels) >= 5:
+            statut = m.get("fixture", {}).get("status", {}).get("short", "")
+            # On accepte tout match non débuté, reporté ou à définir
+            if statut in ["NS", "TBD", "PST"]:
+                matchs_reels.append({
+                    "home": m.get("teams", {}).get("home", {}).get("name"),
+                    "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                    "away": m.get("teams", {}).get("away", {}).get("name"),
+                    "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                    "league": m.get("league", {}).get("name", ""),
+                    "league_id": 1,
+                    "date": m.get("fixture", {}).get("date")
+                })
+            if len(matchs_reels) >= 6:
                 break
-
-        return matchs_reels
-            
+                
     except Exception as e:
-        logging.error(f"Erreur lors de la récupération directe des fixtures : {e}")
-        return []
+        logging.error(f"Erreur Stratégie A : {e}")
+
+    # Stratégie B (Secours) : Si la recherche par ligue est vide, on cherche sur les dates d'aujourd'hui et demain
+    if not matchs_reels:
+        logging.info("Stratégie A vide, bascule sur la Stratégie B (Filtre par date)...")
+        try:
+            for i in range(2):
+                date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+                url_date = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
+                res_date = requests.get(url_date, headers=headers, timeout=10).json()
+                
+                for m in res_date.get("response", []):
+                    lig_id = m.get("league", {}).get("id")
+                    # Coupe du Monde (1) ou Ligues Majeures Européennes au cas où
+                    if lig_id in [1, 2, 39, 140, 61, 135, 78]:
+                        statut = m.get("fixture", {}).get("status", {}).get("short", "")
+                        if statut in ["NS", "TBD"]:
+                            matchs_reels.append({
+                                "home": m.get("teams", {}).get("home", {}).get("name"),
+                                "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                                "away": m.get("teams", {}).get("away", {}).get("name"),
+                                "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                                "league": m.get("league", {}).get("name", ""),
+                                "league_id": lig_id,
+                                "date": m.get("fixture", {}).get("date")
+                            })
+                    if len(matchs_reels) >= 5:
+                        break
+                if len(matchs_reels) >= 5:
+                    break
+        except Exception as e:
+            logging.error(f"Erreur Stratégie B : {e}")
+            
+    return matchs_reels
 
 # --- INTERFACE TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -163,7 +196,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan des vrais matchs...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan étendu des vrais matchs...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
@@ -205,7 +238,7 @@ async def main():
         return
     token_propre = "".join(TOKEN.split())
 
-    # Serveur Web de maintien en ligne (Render)
+    # Serveur Web Render
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
