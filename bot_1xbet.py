@@ -8,58 +8,51 @@ from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Configuration des logs
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 def nettoyer_variable(nom_variable):
     valeur = os.environ.get(nom_variable)
-    if valeur:
-        return valeur.replace('\n', '').replace('\r', '').strip()
+    if valeur: return valeur.replace('\n', '').replace('\r', '').strip()
     return None
 
 TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 
-# --- FORMULE MATHÉMATIQUE DE POISSON ---
 def probabilite_poisson(k, laambda):
     if laambda <= 0: laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- MOTEUR DE CALCUL EXPERT EN MATRICE ÉTENDUE (0 À 7 BUTS) ---
-def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
+# --- MOTEUR ULTRA-PRÉCIS AVEC LIGUE ET SAISON DYNAMIQUES ---
+def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league_id, date_match):
     url = "https://v3.football.api-sports.io/teams/statistics"
-    headers = {
-        'x-rapidapi-key': API_FOOTBALL_KEY,
-        'x-rapidapi-host': 'v3.football.api-sports.io'
-    }
-    saison = 2025
+    headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     
-    # Valeurs moyennes de base stables pour le modèle xG
-    lambda_home = 1.55  
-    mu_away = 1.15
+    # Correction : Calcul de la saison dynamique selon la date du match
+    date_obj = dt.datetime.strptime(date_match.split('T')[0], '%Y-%m-%d')
+    saison = date_obj.year if league_id in [1, 4] else (date_obj.year - 1 if date_obj.month < 7 else date_obj.year)
+    
+    # Moyennes par défaut si l'API n'a pas encore assez de données
+    lambda_home = 1.45  
+    mu_away = 1.05
     
     if team_home_id and team_away_id and API_FOOTBALL_KEY:
         try:
-            res_home = requests.get(f"{url}?league=39&season={saison}&team={team_home_id}", headers=headers, timeout=5).json()
-            res_away = requests.get(f"{url}?league=39&season={saison}&team={team_away_id}", headers=headers, timeout=5).json()
+            # Correction : L'API interroge la VRAIE ligue et la VRAIE saison
+            res_home = requests.get(f"{url}?league={league_id}&season={saison}&team={team_home_id}", headers=headers, timeout=5).json()
+            res_away = requests.get(f"{url}?league={league_id}&season={saison}&team={team_away_id}", headers=headers, timeout=5).json()
             
             form_home_goals = res_home.get("response", {}).get("goals", {}).get("for", {}).get("average", {}).get("home")
             form_away_goals = res_away.get("response", {}).get("goals", {}).get("for", {}).get("average", {}).get("away")
             
-            if form_home_goals: lambda_home = float(form_home_goals) * 1.05
-            if form_away_goals: mu_away = float(form_away_goals) * 0.95
+            if form_home_goals: lambda_home = float(form_home_goals)
+            if form_away_goals: mu_away = float(form_away_goals)
         except Exception as e:
-            logging.error(f"Erreur calculs stats API : {e}")
+            logging.error(f"Erreur stats dynamiques API : {e}")
 
     prob_1, prob_N, prob_2 = 0.0, 0.0, 0.0
-    prob_btts_oui = 0.0
-    prob_over_25 = 0.0
+    prob_btts_oui, prob_over_25, prob_over_35 = 0.0, 0.0, 0.0
     scores = {}
     
-    # MATRICE ÉTENDUE : Analyse de 0 à 7 buts par équipe (range(8))
     for h in range(8):
         for a in range(8):
             p_h = probabilite_poisson(h, lambda_home)
@@ -72,52 +65,58 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away):
             
             if h > 0 and a > 0: prob_btts_oui += p_score
             if (h + a) >= 3: prob_over_25 += p_score
+            if (h + a) >= 4: prob_over_35 += p_score  # Ajout de l'Over 3.5 pour grosses cotes
             scores[f"{h}-{a}"] = p_score
 
     scores_tries = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     top_scores = [f"{sc[0]} ({round(sc[1]*100, 1)}%)" for sc in scores_tries[:2]]
     
-    total_1N2 = prob_1 + prob_N + prob_2 if (prob_1 + prob_N + prob_2) > 0 else 1
-    p1 = prob_1 / total_1N2
-    pN = prob_N / total_1N2
-    p2 = prob_2 / total_1N2
+    total_1N2 = prob_1 + prob_N + prob_2
+    p1, pN, p2 = prob_1 / total_1N2, prob_N / total_1N2, prob_2 / total_1N2
     
-    cote_theorique_1 = round(1 / p1, 2) if p1 > 0 else 99.0
-    cote_theorique_N = round(1 / pN, 2) if pN > 0 else 99.0
-    cote_theorique_2 = round(1 / p2, 2) if p2 > 0 else 99.0
-    
-    cote_1xbet_1 = round(cote_theorique_1 * 1.08, 2)
-    
+    # Cotes théoriques pures
+    ct1 = round(1 / p1, 2) if p1 > 0 else 99.0
+    ctN = round(1 / pN, 2) if pN > 0 else 99.0
+    ct2 = round(1 / p2, 2) if p2 > 0 else 99.0
+    ct_btts = round(1 / prob_btts_oui, 2) if prob_btts_oui > 0 else 99.0
+    ct_o25 = round(1 / prob_over_25, 2) if prob_over_25 > 0 else 99.0
+    ct_o35 = round(1 / prob_over_35, 2) if prob_over_35 > 0 else 99.0
+
     options_valides = [
-        {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": cote_theorique_1, "cote_bk": cote_1xbet_1, "desc": "Indice de dangerosité xG supérieur à la moyenne de la ligue."},
-        {"nom": "Les deux équipes marquent (BTTS)", "prob": int(prob_btts_oui*100), "cote_th": round(1/prob_btts_oui, 2) if prob_btts_oui > 0 else 99.0, "cote_bk": round((1/prob_btts_oui)*1.02, 2) if prob_btts_oui > 0 else 99.0, "desc": "Volume de clean sheets très faible sur la distribution matricielle."},
-        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over_25*100), "cote_th": round(1/prob_over_25, 2) if prob_over_25 > 0 else 99.0, "cote_bk": round((1/prob_over_25)*1.03, 2) if prob_over_25 > 0 else 99.0, "desc": "Densité de probabilité centrée sur des scores à fort xG cumulé."}
+        {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": ct1, "desc": "Dynamique offensive à domicile supérieure."},
+        {"nom": f"Victoire {nom_away}", "prob": int(p2*100), "cote_th": ct2, "desc": "Supériorité nette à l'extérieur sur la matrice."},
+        {"nom": "Les deux équipes marquent", "prob": int(prob_btts_oui*100), "cote_th": ct_btts, "desc": "Faible densité de clean sheets de part d'autre."},
+        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over_25*100), "cote_th": ct_o25, "desc": "Espérance de buts cumulée élevée."},
+        {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Modèle Poisson centré sur un score fleuve (Grosse Cote)."}
     ]
     
-    recommandation = max(options_valides, key=lambda x: x["prob"])
+    # STRATÉGIE DE RECHERCHE DE COTE > 2.00
+    # On cherche d'abord les options avec une cote théorique solide (entre 1.90 et 2.80) et probabilité > 38%
+    grosses_cotes_viables = [o for o in options_valides if o["prob"] >= 38 and o["cote_th"] >= 1.90]
+    
+    if grosses_cotes_viables:
+        recommandation = max(grosses_cotes_viables, key=lambda x: x["prob"])
+    else:
+        recommandation = max(options_valides, key=lambda x: x["prob"])
     
     return {
         "p1": int(p1*100), "pN": int(pN*100), "p2": int(p2*100),
-        "cote_th1": cote_theorique_1, "cote_thN": cote_theorique_N, "cote_th2": cote_theorique_2,
+        "cote_th1": ct1, "cote_thN": ctN, "cote_th2": ct2,
         "scores": top_scores, "btts": int(prob_btts_oui*100), "over25": int(prob_over_25*100),
         "recommandation": recommandation
     }
 
-# --- FILTRE ET EXTRACTION DYNAMIQUE DES 7 MATCHS RÉELS (SCAN SUR 3 JOURS) ---
+# --- FILTRE ET EXTRACTION SÉCURISÉE AVEC COUPE DU MONDE ---
 def recuperer_vrais_matchs():
-    if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
-        logging.warning("Clé API-Football manquante.")
-        return obtenir_matchs_secours()
+    if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI": return obtenir_matchs_secours()
         
-    headers = {
-        'x-rapidapi-key': API_FOOTBALL_KEY,
-        'x-rapidapi-host': 'v3.football.api-sports.io'
-    }
+    headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
+    
+    # ID 1 = Coupe du Monde, ID 2 = Champions League, IDs 39, 140, 61, 135, 78 = Top 5 Europe
+    LIGUES_CIBLEES = [1, 2, 39, 61, 78, 135, 140]
     
     try:
         matchs_reels = []
-        
-        # Le script scanne aujourd'hui (J+0), demain (J+1) et après-demain (J+2) pour trouver les vrais matchs
         for i in range(3):
             date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
             url = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
@@ -126,42 +125,32 @@ def recuperer_vrais_matchs():
             matchs = response.get("response", [])
             
             for m in matchs:
-                ligue = m.get("league", {}).get("name", "")
+                ligue_id = m.get("league", {}).get("id")
                 statut = m.get("fixture", {}).get("status", {}).get("short", "")
                 
-                # Capture de la Coupe du Monde (World Cup) ou des compétitions majeures
-                if "World Cup" in ligue or ligue in ["Friendlies", "Copa America", "Euro", "UEFA Champions League"]:
-                    if statut in ["NS", "TBD"]:  # Uniquement les matchs non commencés
-                        matchs_reels.append({
-                            "home": m.get("teams", {}).get("home", {}).get("name"),
-                            "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                            "away": m.get("teams", {}).get("away", {}).get("name"),
-                            "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                            "league": ligue
-                        })
-                
-                if len(matchs_reels) >= 7:
-                    break
-            if len(matchs_reels) >= 7:
-                break
+                if ligue_id in LIGUES_CIBLEES and statut in ["NS", "TBD"]:
+                    matchs_reels.append({
+                        "home": m.get("teams", {}).get("home", {}).get("name"),
+                        "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                        "away": m.get("teams", {}).get("away", {}).get("name"),
+                        "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                        "league": m.get("league", {}).get("name", ""),
+                        "league_id": ligue_id,
+                        "date": m.get("fixture", {}).get("date")
+                    })
+                if len(matchs_reels) >= 5: break
+            if len(matchs_reels) >= 5: break
 
-        if matchs_reels:
-            return matchs_reels
-            
+        if matchs_reels: return matchs_reels
     except Exception as e:
-        logging.error(f"Erreur lors de la récupération par date globale : {e}")
+        logging.error(f"Erreur récupération matchs : {e}")
         
     return obtenir_matchs_secours()
 
 def obtenir_matchs_secours():
     return [
-        {"home": "Real Madrid", "home_id": 541, "away": "FC Barcelone", "away_id": 529, "league": "La Liga"},
-        {"home": "Manchester City", "home_id": 50, "away": "Liverpool", "away_id": 40, "league": "Premier League"},
-        {"home": "Bayern Munich", "home_id": 157, "away": "Dortmund", "away_id": 165, "league": "Bundesliga"},
-        {"home": "Paris SG", "home_id": 85, "away": "Marseille", "away_id": 81, "league": "Ligue 1"},
-        {"home": "Juventus", "home_id": 496, "away": "Inter Milan", "away_id": 505, "league": "Serie A"},
-        {"home": "Arsenal", "home_id": 42, "away": "Chelsea", "away_id": 49, "league": "Premier League"},
-        {"home": "Atletico Madrid", "home_id": 530, "away": "FC Valence", "away_id": 532, "league": "La Liga"}
+        {"home": "France", "home_id": 2, "away": "Brésil", "away_id": 6, "league": "World Cup", "league_id": 1, "date": "2026-07-05T18:00:00+00:00"},
+        {"home": "Real Madrid", "home_id": 541, "away": "FC Barcelone", "away_id": 529, "league": "La Liga", "league_id": 140, "date": "2026-09-20T20:00:00+00:00"}
     ]
 
 # --- INTERFACE TELEGRAM ---
@@ -169,50 +158,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
-        "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
-        "Filtres actifs : Volume étendu (7 matchs), Matrice globale Poisson (0-7 buts), Scan Coupe du Monde actif.",
-        reply_markup=reply_markup,
-        parse_mode="Markdown"
+        "🧠 *Bot IA Connecté & Précis.*\n\n"
+        "Analyses basées sur la Coupe du Monde, la Ligue des Champions et les ligues majeures avec détection automatique des saisons.",
+        reply_markup=reply_markup, parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Analyse des 7 prochaines grosses affiches réelles...")
-        
+        await update.message.reply_text("🕵️‍♂️ Scan des ligues majeures et calculs matriciels en cours...")
         matchs_du_jour = recuperer_vrais_matchs()
         
         for idx, m in enumerate(matchs_du_jour, 1):
-            res = analyser_match_expert(m["home_id"], m["away_id"], m["home"], m["away"])
+            res = analyser_match_expert(m["home_id"], m["away_id"], m["home"], m["away"], m["league_id"], m["date"])
             rec = res["recommandation"]
 
             message_match = (
                 f"⚔️ *MATCH {idx}/{len(matchs_du_jour)} : {m['home']} vs {m['away']}*\n"
                 f"🏆 Compétition : {m['league']}\n\n"
-                f"📈 *Probabilités et Cotes Théoriques (Poisson 0-7 Buts) :*\n"
-                f"• *1 :* {res['p1']}% (Cote juste : {res['cote_th1']})\n"
-                f"• *N :* {res['pN']}% (Cote juste : {res['cote_thN']})\n"
-                f"• *2 :* {res['p2']}% (Cote juste : {res['cote_th2']})\n\n"
-                f"🎯 *Métriques Offensives Avancées (Modèle xG) :*\n"
-                f"• *Top Scores Exacts :* {', '.join(res['scores'])}\n"
-                f"• *Les deux marquent :* Oui ({res['btts']}%) | Non ({100 - res['btts']}%)\n"
-                f"• *Total Buts :* Plus de 2.5 ({res['over25']}%)\n\n"
-                f"💎 *FILTRE DE VALUE DETECTÉE :*\n"
-                f"👉 *Option validée : {rec['nom']}*\n"
-                f"📊 Probabilité algorithmique : {rec['prob']}%\n"
-                f"📉 Notre Cote : {rec['cote_th']} | ⚠️ Seuil minimum conseillé : {rec['cote_bk']}\n"
-                f"💡 *Avis de l'IA :* {rec['desc']}\n"
+                f"📈 *Probabilités & Cotes Estimées :*\n"
+                f"• *1 :* {res['p1']}% (Cote : {res['cote_th1']})\n"
+                f"• *N :* {res['pN']}% (Cote : {res['cote_thN']})\n"
+                f"• *2 :* {res['p2']}% (Cote : {res['cote_th2']})\n\n"
+                f"🎯 *Analyses du Score :*\n"
+                f"• *Scores Probables :* {', '.join(res['scores'])}\n"
+                f"• *BTTS Oui :* {res['btts']}%\n"
+                f"• *Over 2.5 :* {res['over25']}%\n\n"
+                f"💎 *OPTION VALIDÉE (RECHERCHE DE VALUE) :*\n"
+                f"👉 *{rec['nom']}*\n"
+                f"📊 Probabilité : {rec['prob']}%\n"
+                f"📉 Cote théorique cible : {rec['cote_th']}\n"
+                f"💡 *Note :* {rec['desc']}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             await update.message.reply_text(message_match, parse_mode="Markdown")
-            await asyncio.sleep(1)  # Pause d'une seconde pour éviter les restrictions de Telegram
+            await asyncio.sleep(1)
 
-async def handle_ping(request):
-    return web.Response(text="Bot en ligne")
+async def handle_ping(request): return web.Response(text="Bot en ligne")
 
 async def main():
     if not TOKEN: return
     token_propre = "".join(TOKEN.split())
-
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
