@@ -96,7 +96,6 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Modèle Poisson centré sur un score fleuve (Grosse Cote)."}
     ]
     
-    # Stratégie de filtrage : Priorité aux grosses cotes (> 1.90) si la probabilité est solide (> 38%)
     grosses_cotes_viables = [o for o in options_valides if o["prob"] >= 38 and o["cote_th"] >= 1.90]
     
     if grosses_cotes_viables:
@@ -108,10 +107,10 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "p1": int(p1*100), "pN": int(pN*100), "p2": int(p2*100),
         "cote_th1": ct1, "cote_thN": ctN, "cote_th2": ct2,
         "scores": top_scores, "btts": int(prob_btts_oui*100), "over25": int(prob_over_25*100),
-        "recommandation": recommandation
+        "recommandation": recommendation
     }
 
-# --- FILTRE ET EXTRACTION SANS AUCUN MATCH FANTÔME (SCAN SUR 3 JOURS) ---
+# --- FILTRE ET EXTRACTION SÉCURISÉE DES VRAIS MATCHS A VENIR ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -122,41 +121,33 @@ def recuperer_vrais_matchs():
         'x-rapidapi-host': 'v3.football.api-sports.io'
     }
     
-    # IDs : 1=World Cup, 2=Champions League, 39=Premier League, 140=LaLiga, 61=Ligue 1, 135=Serie A, 78=Bundesliga
-    LIGUES_CIBLEES = [1, 2, 39, 61, 78, 135, 140]
     matchs_reels = []
     
+    # Correction : Requête directe sur la Coupe du Monde (ID 1) pour la saison 2026, statut non démarré (NS)
     try:
-        for i in range(3):
-            date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
-            url = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
+        url = "https://v3.football.api-sports.io/fixtures?league=1&season=2026&status=NS"
+        response = requests.get(url, headers=headers, timeout=10).json()
+        matchs = response.get("response", [])
+        
+        for m in matchs:
+            matchs_reels.append({
+                "home": m.get("teams", {}).get("home", {}).get("name"),
+                "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                "away": m.get("teams", {}).get("away", {}).get("name"),
+                "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                "league": m.get("league", {}).get("name", ""),
+                "league_id": 1,
+                "date": m.get("fixture", {}).get("date")
+            })
             
-            response = requests.get(url, headers=headers, timeout=10).json()
-            matchs = response.get("response", [])
-            
-            for m in matchs:
-                ligue_id = m.get("league", {}).get("id")
-                statut = m.get("fixture", {}).get("status", {}).get("short", "")
-                
-                if ligue_id in LIGUES_CIBLEES and statut in ["NS", "TBD"]:
-                    matchs_reels.append({
-                        "home": m.get("teams", {}).get("home", {}).get("name"),
-                        "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                        "away": m.get("teams", {}).get("away", {}).get("name"),
-                        "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                        "league": m.get("league", {}).get("name", ""),
-                        "league_id": ligue_id,
-                        "date": m.get("fixture", {}).get("date")
-                    })
-                if len(matchs_reels) >= 5:
-                    break
+            # Limite à 5 affiches réelles pour éviter de saturer Telegram
             if len(matchs_reels) >= 5:
                 break
 
         return matchs_reels
             
     except Exception as e:
-        logging.error(f"Erreur lors de la récupération des matchs : {e}")
+        logging.error(f"Erreur lors de la récupération directe des fixtures : {e}")
         return []
 
 # --- INTERFACE TELEGRAM ---
@@ -177,7 +168,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         matchs_du_jour = recuperer_vrais_matchs()
         
         if not matchs_du_jour:
-            await update.message.reply_text("ℹ️ *Aucun match réel disponible* dans les ligues majeures pour les 3 prochains jours.", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match réel disponible* dans la compétition ciblée pour le moment.", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_du_jour, 1):
@@ -214,7 +205,7 @@ async def main():
         return
     token_propre = "".join(TOKEN.split())
 
-    # Serveur Web pour empêcher Render de couper l'application
+    # Serveur Web de maintien en ligne (Render)
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
