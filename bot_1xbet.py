@@ -1,121 +1,239 @@
+import logging
 import os
-from datetime import datetime
+import math
 import requests
+import asyncio
+import datetime as dt
+from aiohttp import web
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# ==========================================
-# CONFIGURATION ET CONSTANTES (API-FOOTBALL)
-# ==========================================
-API_KEY = os.environ.get("API_FOOTBALL_KEY", "TON_API_KEY_ICI")
-BASE_URL = "https://v3.football.api-sports.io"
+# Configuration des logs
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 
-# ID officiel pour la Coupe du Monde (League ID = 1, Saison = 2026)
-WORLD_CUP_LEAGUE_ID = 1
-SEASON_YEAR = 2026
+def nettoyer_variable(nom_variable):
+    valeur = os.environ.get(nom_variable)
+    if valeur:
+        return valeur.replace('\n', '').replace('\r', '').strip()
+    return None
 
-HEADERS = {
-    "x-rapidapi-host": "v3.football.api-sports.io",
-    "x-rapidapi-key": API_KEY
-}
+TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
+API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 
+# --- FORMULE MATHÉMATIQUE DE POISSON ---
+def probabilite_poisson(k, laambda):
+    if laambda <= 0: laambda = 0.01
+    return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-def obtenir_matchs_du_jour():
-    """
-    Récupère la liste des vrais matchs programmés pour la date du jour.
-    Si aucun match n'est trouvé, le bot retourne une liste vide au lieu de simuler.
-    """
-    date_aujourdhui = datetime.now().strftime("%Y-%m-%d")
-    endpoint = f"{BASE_URL}/fixtures"
-    
-    parametres = {
-        "league": WORLD_CUP_LEAGUE_ID,
-        "season": SEASON_YEAR,
-        "date": date_aujourdhui
+# --- MOTEUR DE CALCUL EXPERT EN MATRICE ÉTENDUE ---
+def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league_id, date_match):
+    url = "https://v3.football.api-sports.io/teams/statistics"
+    headers = {
+        'x-rapidapi-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
     }
     
-    try:
-        response = requests.get(endpoint, headers=HEADERS, params=parametres, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Extraction sécurisée des données de l'API
-        fixtures = data.get("response", [])
-        return fixtures
-        
-    except requests.exceptions.RequestException as e:
-        print(f"[ERREUR API] Impossible de récupérer les matchs : {e}")
-        return []
+    # Calcul de la saison dynamique
+    date_obj = dt.datetime.strptime(date_match.split('T')[0], '%Y-%m-%d')
+    saison = date_obj.year if league_id in [1, 4] else (date_obj.year - 1 if date_obj.month < 7 else date_obj.year)
+    
+    lambda_home = 1.45  
+    mu_away = 1.05
+    
+    if team_home_id and team_away_id and API_FOOTBALL_KEY:
+        try:
+            res_home = requests.get(f"{url}?league={league_id}&season={saison}&team={team_home_id}", headers=headers, timeout=5).json()
+            res_away = requests.get(f"{url}?league={league_id}&season={saison}&team={team_away_id}", headers=headers, timeout=5).json()
+            
+            form_home_goals = res_home.get("response", {}).get("goals", {}).get("for", {}).get("average", {}).get("home")
+            form_away_goals = res_away.get("response", {}).get("goals", {}).get("for", {}).get("average", {}).get("away")
+            
+            if form_home_goals: lambda_home = float(form_home_goals)
+            if form_away_goals: mu_away = float(form_away_goals)
+        except Exception as e:
+            logging.error(f"Erreur calculs stats API : {e}")
 
+    prob_1, prob_N, prob_2 = 0.0, 0.0, 0.0
+    prob_btts_oui, prob_over_25, prob_over_35 = 0.0, 0.0, 0.0
+    scores = {}
+    
+    for h in range(8):
+        for a in range(8):
+            p_h = probabilite_poisson(h, lambda_home)
+            p_a = probabilite_poisson(a, mu_away)
+            p_score = p_h * p_a
+            
+            if h > a: prob_1 += p_score
+            elif h == a: prob_N += p_score
+            else: prob_2 += p_score
+            
+            if h > 0 and a > 0: prob_btts_oui += p_score
+            if (h + a) >= 3: prob_over_25 += p_score
+            if (h + a) >= 4: prob_over_35 += p_score
+            scores[f"{h}-{a}"] = p_score
 
-def analyser_statistiques_btts(match_data):
-    """
-    Exemple d'algorithme d'analyse statistique épuré.
-    Calcule des probabilités réelles basées sur les données récoltées.
-    """
-    # Éviter les calculs inutiles si les données du match sont manquantes
-    if not match_data:
-        return None
-        
-    # Exemple de structure d'analyse (à adapter selon les données statistiques réelles de tes équipes)
-    probabilite_btts = 50.0  # Remplacer par ta logique matricielle basée sur xG / Clean sheets réels
-    cote_theorique = round(100 / probabilite_btts, 2) if probabilite_btts > 0 else 0
+    scores_tries = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    top_scores = [f"{sc[0]} ({round(sc[1]*100, 1)}%)" for sc in scores_tries[:2]]
+    
+    total_1N2 = prob_1 + prob_N + prob_2 if (prob_1 + prob_N + prob_2) > 0 else 1
+    p1, pN, p2 = prob_1 / total_1N2, prob_N / total_1N2, prob_2 / total_1N2
+    
+    ct1 = round(1 / p1, 2) if p1 > 0 else 99.0
+    ctN = round(1 / pN, 2) if pN > 0 else 99.0
+    ct2 = round(1 / p2, 2) if p2 > 0 else 99.0
+    ct_btts = round(1 / prob_btts_oui, 2) if prob_btts_oui > 0 else 99.0
+    ct_o25 = round(1 / prob_over_25, 2) if prob_over_25 > 0 else 99.0
+    ct_o35 = round(1 / prob_over_35, 2) if prob_over_35 > 0 else 99.0
+
+    options_valides = [
+        {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": ct1, "desc": "Dynamique offensive à domicile supérieure."},
+        {"nom": f"Victoire {nom_away}", "prob": int(p2*100), "cote_th": ct2, "desc": "Supériorité nette à l'extérieur sur la matrice."},
+        {"nom": "Les deux équipes marquent", "prob": int(prob_btts_oui*100), "cote_th": ct_btts, "desc": "Faible densité de clean sheets de part d'autre."},
+        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over_25*100), "cote_th": ct_o25, "desc": "Espérance de buts cumulée élevée."},
+        {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Modèle Poisson centré sur un score fleuve (Grosse Cote)."}
+    ]
+    
+    # Stratégie de filtrage : Priorité aux grosses cotes (> 1.90) si la probabilité est solide (> 38%)
+    grosses_cotes_viables = [o for o in options_valides if o["prob"] >= 38 and o["cote_th"] >= 1.90]
+    
+    if grosses_cotes_viables:
+        recommandation = max(grosses_cotes_viables, key=lambda x: x["prob"])
+    else:
+        recommandation = max(options_valides, key=lambda x: x["prob"])
     
     return {
-        "btts_oui_prob": probabilite_btts,
-        "cote_cible": cote_theorique
+        "p1": int(p1*100), "pN": int(pN*100), "p2": int(p2*100),
+        "cote_th1": ct1, "cote_thN": ctN, "cote_th2": ct2,
+        "scores": top_scores, "btts": int(prob_btts_oui*100), "over25": int(prob_over_25*100),
+        "recommandation": recommandation
     }
 
+# --- FILTRE ET EXTRACTION SANS AUCUN MATCH FANTÔME (SCAN SUR 3 JOURS) ---
+def recuperer_vrais_matchs():
+    if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
+        logging.warning("Clé API-Football manquante.")
+        return []
+        
+    headers = {
+        'x-rapidapi-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
+    
+    # IDs : 1=World Cup, 2=Champions League, 39=Premier League, 140=LaLiga, 61=Ligue 1, 135=Serie A, 78=Bundesliga
+    LIGUES_CIBLEES = [1, 2, 39, 61, 78, 135, 140]
+    matchs_reels = []
+    
+    try:
+        for i in range(3):
+            date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+            url = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
+            
+            response = requests.get(url, headers=headers, timeout=10).json()
+            matchs = response.get("response", [])
+            
+            for m in matchs:
+                ligue_id = m.get("league", {}).get("id")
+                statut = m.get("fixture", {}).get("status", {}).get("short", "")
+                
+                if ligue_id in LIGUES_CIBLEES and statut in ["NS", "TBD"]:
+                    matchs_reels.append({
+                        "home": m.get("teams", {}).get("home", {}).get("name"),
+                        "home_id": m.get("teams", {}).get("home", {}).get("id"),
+                        "away": m.get("teams", {}).get("away", {}).get("name"),
+                        "away_id": m.get("teams", {}).get("away", {}).get("id"),
+                        "league": m.get("league", {}).get("name", ""),
+                        "league_id": ligue_id,
+                        "date": m.get("fixture", {}).get("date")
+                    })
+                if len(matchs_reels) >= 5:
+                    break
+            if len(matchs_reels) >= 5:
+                break
 
-def formater_message_prediction(match):
-    """
-    Génère proprement le texte du message Telegram pour un vrai match.
-    """
-    equipe_domicile = match["teams"]["home"]["name"]
-    equipe_exterieur = match["teams"]["away"]["name"]
-    statut_match = match["fixture"]["status"]["long"]
-    
-    # Lancement de ton analyse matricielle propre
-    analyse = analyser_statistiques_btts(match)
-    
-    message = (
-        f"⚔️ **MATCH : {equipe_domicile} vs {equipe_exterieur}**\n"
-        f"🏆 Compétition : Coupe du Monde 2026\n"
-        f"📊 Statut : {statut_match}\n\n"
-        f"💎 **OPTION VALIDÉE (RECHERCHE DE VALUE) :**\n"
-        f"👉 Les deux équipes marquent (BTTS)\n"
-        f"📊 Probabilité calculée : {analyse['btts_oui_prob']}%\n"
-        f"📉 Cote théorique cible : {analyse['cote_cible']}\n"
+        return matchs_reels
+            
+    except Exception as e:
+        logging.error(f"Erreur lors de la récupération des matchs : {e}")
+        return []
+
+# --- INTERFACE TELEGRAM ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    clavier = [['📊 Analyser les matchs du jour']]
+    reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
+    await update.message.reply_text(
+        "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
+        "Analyses mathématiques pures basées sur le modèle Poisson étendu.",
+        reply_markup=reply_markup,
+        parse_mode="Markdown"
     )
-    return message
 
+async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.message.text == "📊 Analyser les matchs du jour":
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan des vrais matchs...")
+        
+        matchs_du_jour = recuperer_vrais_matchs()
+        
+        if not matchs_du_jour:
+            await update.message.reply_text("ℹ️ *Aucun match réel disponible* dans les ligues majeures pour les 3 prochains jours.", parse_mode="Markdown")
+            return
+        
+        for idx, m in enumerate(matchs_du_jour, 1):
+            res = analyser_match_expert(m["home_id"], m["away_id"], m["home"], m["away"], m["league_id"], m["date"])
+            rec = res["recommandation"]
 
-def executer_scan_prediction():
-    """
-    Fonction principale appelée par ton webhook ou ta commande Telegram /analyser.
-    """
-    print("[LOG] Lancement du scan des matchs réels...")
-    matchs = obtenir_matchs_du_jour()
+            message_match = (
+                f"⚔️ *MATCH {idx}/{len(matchs_du_jour)} : {m['home']} vs {m['away']}*\n"
+                f"🏆 Compétition : {m['league']}\n\n"
+                f"📈 *Probabilités et Cotes Théoriques (Poisson 0-7 Buts) :*\n"
+                f"• *1 :* {res['p1']}% (Cote juste : {res['cote_th1']})\n"
+                f"• *N :* {res['pN']}% (Cote juste : {res['cote_thN']})\n"
+                f"• *2 :* {res['p2']}% (Cote juste : {res['cote_th2']})\n\n"
+                f"🎯 *Métriques Offensives Avancées :*\n"
+                f"• *Top Scores Exacts :* {', '.join(res['scores'])}\n"
+                f"• *Les deux marquent :* Oui ({res['btts']}%) | Non ({100 - res['btts']}%)\n"
+                f"• *Total Buts :* Plus de 2.5 ({res['over25']}%)\n\n"
+                f"💎 *FILTRE DE VALUE DETECTÉE :*\n"
+                f"👉 *Option validée : {rec['nom']}*\n"
+                f"📊 Probabilité algorithmique : {rec['prob']}%\n"
+                f"📉 Notre Cote Cible : {rec['cote_th']}\n"
+                f"💡 *Avis de l'IA :* {rec['desc']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            await update.message.reply_text(message_match, parse_mode="Markdown")
+            await asyncio.sleep(1)
+
+async def handle_ping(request):
+    return web.Response(text="Bot en ligne")
+
+async def main():
+    if not TOKEN: 
+        logging.error("TELEGRAM_TOKEN manquant dans l'environnement.")
+        return
+    token_propre = "".join(TOKEN.split())
+
+    # Serveur Web pour empêcher Render de couper l'application
+    web_app = web.Application()
+    web_app.router.add_get('/', handle_ping)
     
-    if not matchs:
-        message_vide = "ℹ️ **Aucun match de Coupe du Monde programmé pour aujourd'hui ({}) dans l'API.**".format(
-            datetime.now().strftime("%d/%m/%Y")
-        )
-        print("[LOG] Fin du traitement : Aucun match trouvé.")
-        return [message_vide]
-        
-    messages_a_envoyer = []
-    for match in matchs:
-        texte_pronostic = formater_message_prediction(match)
-        messages_a_envoyer.append(texte_pronostic)
-        
-    return messages_a_envoyer
+    port = int(os.environ.get("PORT", 10000))
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    await web.TCPSite(runner, '0.0.0.0', port).start()
 
+    # Application Telegram
+    application = Application.builder().token(token_propre).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
+    
+    async with application:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        while True: 
+            await asyncio.sleep(3600)
 
-# ==========================================
-# ZONE DE TEST LOCAL
-# ==========================================
-if __name__ == "__main__":
-    # Permet de tester le script directement dans ta console PythonAnywhere
-    resultats = executer_scan_prediction()
-    for msg in resultats:
-        print("\n--- Message Généré ---")
-        print(msg)
+if __name__ == '__main__':
+    asyncio.run(main())
