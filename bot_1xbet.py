@@ -90,7 +90,6 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
     ct_o25 = round(1 / prob_over_25, 2) if prob_over_25 > 0 else 99.0
     ct_o35 = round(1 / prob_over_35, 2) if prob_over_35 > 0 else 99.0
 
-    # Liste de toutes les options possibles avec critères de sécurité renforcés
     options_valides = [
         {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": ct1, "desc": "Indicateurs historiques ultra-favorables à domicile.", "min_p": 55},
         {"nom": f"Victoire {nom_away}", "prob": int(p2*100), "cote_th": ct2, "desc": "Supériorité stratégique nette à l'extérieur.", "min_p": 55},
@@ -99,20 +98,17 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Configuration rare de festival offensif (Value Élevée).", "min_p": 48}
     ]
     
-    # 1. Filtre Premium : Grosses cotes ET probabilité solide (Sécurité maximale)
     filtre_haute_securite = [o for o in options_valides if o["prob"] >= o["min_p"] and o["cote_th"] >= 1.90]
     
     if filtre_haute_securite:
         recommandation = max(filtre_haute_securite, key=lambda x: x["prob"])
         statut_validation = "🔒 VALIDATION SÉCURISÉE (HAUT DE GAMME)"
     else:
-        # 2. Repli de sécurité : Si aucune grosse cote n'est sûre, on prend l'option générale la plus safe (>65%)
         options_safe = [o for o in options_valides if o["prob"] >= 65]
         if options_safe:
             recommandation = max(options_safe, key=lambda x: x["prob"])
             statut_validation = "🛡️ REPLI DE SÉCURITÉ (PROBABILITÉ ÉLEVÉE)"
         else:
-            # 3. Alerte ultime si le match est un piège illisible
             recommandation = max(options_valides, key=lambda x: x["prob"])
             statut_validation = "⚠️ ALERTE RISQUE ÉLEVÉ (MATCH TRÈS INSTABLE)"
     
@@ -124,7 +120,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "statut_validation": statut_validation
     }
 
-# --- RECHERCHE PAR DATE NETTOYÉE ---
+# --- RECHERCHE AVEC GESTION DE DATE LOCALE ET LIGUES ÉLARGIES ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -136,11 +132,15 @@ def recuperer_vrais_matchs():
     }
     
     matchs_reels = []
-    LIGUES_AUTORISEES = [1, 2, 39, 61, 78, 135, 140]
+    # Extension temporaire des ligues pour capter du flux continu (Majeures + Actives)
+    LIGUES_AUTORISEES = [1, 2, 39, 61, 78, 135, 140, 71, 253, 103] 
     base_url = "https://v3.football.api-sports.io/fixtures"
     
+    # Utilisation d'un décalage fixe (+1 heure pour correspondre à ton fuseau local)
+    maintenant_local = dt.datetime.utcnow() + dt.timedelta(hours=1)
+    
     for i in range(3):
-        date_string = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+        date_string = (maintenant_local + dt.timedelta(days=i)).strftime('%Y-%m-%d')
         
         try:
             response = requests.get(base_url, headers=headers, params={"date": date_string}, timeout=10).json()
@@ -161,9 +161,9 @@ def recuperer_vrais_matchs():
                         "date": f.get("fixture", {}).get("date")
                     })
                     
-                if len(matchs_reels) >= 5:
+                if len(matchs_reels) >= 6:
                     break
-            if len(matchs_reels) >= 5:
+            if len(matchs_reels) >= 6:
                 break
                 
         except Exception as e:
@@ -184,12 +184,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Tri sélectif des opportunités...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan synchronisé sur ton fuseau horaire...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
         if not matchs_du_jour:
-            await update.message.reply_text("ℹ️ *Aucun match réel trouvé* dans l'API pour les prochaines 72 heures.", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match disponible* dans la base de données pour tes compétitions sur les prochaines 72h.", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_du_jour, 1):
