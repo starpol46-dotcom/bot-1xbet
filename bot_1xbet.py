@@ -112,7 +112,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "recommandation": recommendation
     }
 
-# --- RECHERCHE LARGE (NS + TBD + DEUX STRATÉGIES DE CAPTURE) ---
+# --- RECHERCHE PAR DATE (BLINDÉE ET ULTRA-SIMPLE) ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -124,62 +124,41 @@ def recuperer_vrais_matchs():
     }
     
     matchs_reels = []
+    # IDs cibles : 1 = Coupe du Monde, 2 = UCL, etc.
+    LIGUES_AUTORISEES = [1, 2, 39, 61, 78, 135, 140]
     
-    # Stratégie A : Recherche par statut large (NS et TBD) pour la Coupe du Monde (ID 1)
-    try:
-        url = "https://v3.football.api-sports.io/fixtures?league=1&season=2026"
-        response = requests.get(url, headers=headers, timeout=10).json()
-        matchs = response.get("response", [])
+    # On scanne aujourd'hui, demain et après-demain de façon brute par date
+    for i in range(3):
+        date_string = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+        url = f"{url}?date={date_string}" if 'url' in locals() else f"https://v3.football.api-sports.io/fixtures?date={date_string}"
         
-        for m in matchs:
-            statut = m.get("fixture", {}).get("status", {}).get("short", "")
-            # On accepte tout match non débuté, reporté ou à définir
-            if statut in ["NS", "TBD", "PST"]:
-                matchs_reels.append({
-                    "home": m.get("teams", {}).get("home", {}).get("name"),
-                    "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                    "away": m.get("teams", {}).get("away", {}).get("name"),
-                    "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                    "league": m.get("league", {}).get("name", ""),
-                    "league_id": 1,
-                    "date": m.get("fixture", {}).get("date")
-                })
-            if len(matchs_reels) >= 6:
-                break
-                
-    except Exception as e:
-        logging.error(f"Erreur Stratégie A : {e}")
-
-    # Stratégie B (Secours) : Si la recherche par ligue est vide, on cherche sur les dates d'aujourd'hui et demain
-    if not matchs_reels:
-        logging.info("Stratégie A vide, bascule sur la Stratégie B (Filtre par date)...")
         try:
-            for i in range(2):
-                date_scan = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
-                url_date = f"https://v3.football.api-sports.io/fixtures?date={date_scan}"
-                res_date = requests.get(url_date, headers=headers, timeout=10).json()
+            response = requests.get(url, headers=headers, timeout=10).json()
+            fixtures = response.get("response", [])
+            
+            for f in fixtures:
+                ligue_id = f.get("league", {}).get("id")
+                statut = f.get("fixture", {}).get("status", {}).get("short", "")
                 
-                for m in res_date.get("response", []):
-                    lig_id = m.get("league", {}).get("id")
-                    # Coupe du Monde (1) ou Ligues Majeures Européennes au cas où
-                    if lig_id in [1, 2, 39, 140, 61, 135, 78]:
-                        statut = m.get("fixture", {}).get("status", {}).get("short", "")
-                        if statut in ["NS", "TBD"]:
-                            matchs_reels.append({
-                                "home": m.get("teams", {}).get("home", {}).get("name"),
-                                "home_id": m.get("teams", {}).get("home", {}).get("id"),
-                                "away": m.get("teams", {}).get("away", {}).get("name"),
-                                "away_id": m.get("teams", {}).get("away", {}).get("id"),
-                                "league": m.get("league", {}).get("name", ""),
-                                "league_id": lig_id,
-                                "date": m.get("fixture", {}).get("date")
-                            })
-                    if len(matchs_reels) >= 5:
-                        break
+                # S'il s'agit d'une de nos ligues et que le match n'a pas commencé (ou est à définir/reporté)
+                if ligue_id in LIGUES_AUTORISEES and statut in ["NS", "TBD", "PST"]:
+                    matchs_reels.append({
+                        "home": f.get("teams", {}).get("home", {}).get("name"),
+                        "home_id": f.get("teams", {}).get("home", {}).get("id"),
+                        "away": f.get("teams", {}).get("away", {}).get("name"),
+                        "away_id": f.get("teams", {}).get("away", {}).get("id"),
+                        "league": f.get("league", {}).get("name", ""),
+                        "league_id": ligue_id,
+                        "date": f.get("fixture", {}).get("date")
+                    })
+                    
                 if len(matchs_reels) >= 5:
                     break
+            if len(matchs_reels) >= 5:
+                break
+                
         except Exception as e:
-            logging.error(f"Erreur Stratégie B : {e}")
+            logging.error(f"Erreur lors du scan du {date_string} : {e}")
             
     return matchs_reels
 
@@ -196,12 +175,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan étendu des vrais matchs...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan brut des programmations...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
         if not matchs_du_jour:
-            await update.message.reply_text("ℹ️ *Aucun match réel disponible* dans la compétition ciblée pour le moment.", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match réel trouvé* dans l'API pour les prochaines 72 heures.", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_du_jour, 1):
@@ -238,7 +217,6 @@ async def main():
         return
     token_propre = "".join(TOKEN.split())
 
-    # Serveur Web Render
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     
@@ -247,7 +225,6 @@ async def main():
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', port).start()
 
-    # Application Telegram
     application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
