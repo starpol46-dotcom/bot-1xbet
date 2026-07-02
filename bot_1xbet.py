@@ -90,29 +90,41 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
     ct_o25 = round(1 / prob_over_25, 2) if prob_over_25 > 0 else 99.0
     ct_o35 = round(1 / prob_over_35, 2) if prob_over_35 > 0 else 99.0
 
+    # Liste de toutes les options possibles avec critères de sécurité renforcés
     options_valides = [
-        {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": ct1, "desc": "Dynamique offensive à domicile supérieure."},
-        {"nom": f"Victoire {nom_away}", "prob": int(p2*100), "cote_th": ct2, "desc": "Supériorité nette à l'extérieur sur la matrice."},
-        {"nom": "Les deux équipes marquent", "prob": int(prob_btts_oui*100), "cote_th": ct_btts, "desc": "Faible densité de clean sheets de part d'autre."},
-        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over_25*100), "cote_th": ct_o25, "desc": "Espérance de buts cumulée élevée."},
-        {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Modèle Poisson centré sur un score fleuve (Grosse Cote)."}
+        {"nom": f"Victoire {nom_home}", "prob": int(p1*100), "cote_th": ct1, "desc": "Indicateurs historiques ultra-favorables à domicile.", "min_p": 55},
+        {"nom": f"Victoire {nom_away}", "prob": int(p2*100), "cote_th": ct2, "desc": "Supériorité stratégique nette à l'extérieur.", "min_p": 55},
+        {"nom": "Les deux équipes marquent", "prob": int(prob_btts_oui*100), "cote_th": ct_btts, "desc": "Très forte tendance aux carences défensives alignées.", "min_p": 52},
+        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over_25*100), "cote_th": ct_o25, "desc": "Densité offensive cumulée supérieure aux standards.", "min_p": 55},
+        {"nom": "Plus de 3.5 Buts 🔥", "prob": int(prob_over_35*100), "cote_th": ct_o35, "desc": "Configuration rare de festival offensif (Value Élevée).", "min_p": 48}
     ]
     
-    grosses_cotes_viables = [o for o in options_valides if o["prob"] >= 38 and o["cote_th"] >= 1.90]
+    # 1. Filtre Premium : Grosses cotes ET probabilité solide (Sécurité maximale)
+    filtre_haute_securite = [o for o in options_valides if o["prob"] >= o["min_p"] and o["cote_th"] >= 1.90]
     
-    if grosses_cotes_viables:
-        recommandation = max(grosses_cotes_viables, key=lambda x: x["prob"])
+    if filtre_haute_securite:
+        recommandation = max(filtre_haute_securite, key=lambda x: x["prob"])
+        statut_validation = "🔒 VALIDATION SÉCURISÉE (HAUT DE GAMME)"
     else:
-        recommandation = max(options_valides, key=lambda x: x["prob"])
+        # 2. Repli de sécurité : Si aucune grosse cote n'est sûre, on prend l'option générale la plus safe (>65%)
+        options_safe = [o for o in options_valides if o["prob"] >= 65]
+        if options_safe:
+            recommandation = max(options_safe, key=lambda x: x["prob"])
+            statut_validation = "🛡️ REPLI DE SÉCURITÉ (PROBABILITÉ ÉLEVÉE)"
+        else:
+            # 3. Alerte ultime si le match est un piège illisible
+            recommandation = max(options_valides, key=lambda x: x["prob"])
+            statut_validation = "⚠️ ALERTE RISQUE ÉLEVÉ (MATCH TRÈS INSTABLE)"
     
     return {
         "p1": int(p1*100), "pN": int(pN*100), "p2": int(p2*100),
         "cote_th1": ct1, "cote_thN": ctN, "cote_th2": ct2,
         "scores": top_scores, "btts": int(prob_btts_oui*100), "over25": int(prob_over_25*100),
-        "recommandation": recommendation
+        "recommandation": recommandation,
+        "statut_validation": statut_validation
     }
 
-# --- RECHERCHE PAR DATE (BLINDÉE ET ULTRA-SIMPLE) ---
+# --- RECHERCHE PAR DATE NETTOYÉE ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -124,23 +136,20 @@ def recuperer_vrais_matchs():
     }
     
     matchs_reels = []
-    # IDs cibles : 1 = Coupe du Monde, 2 = UCL, etc.
     LIGUES_AUTORISEES = [1, 2, 39, 61, 78, 135, 140]
+    base_url = "https://v3.football.api-sports.io/fixtures"
     
-    # On scanne aujourd'hui, demain et après-demain de façon brute par date
     for i in range(3):
         date_string = (dt.datetime.now() + dt.timedelta(days=i)).strftime('%Y-%m-%d')
-        url = f"{url}?date={date_string}" if 'url' in locals() else f"https://v3.football.api-sports.io/fixtures?date={date_string}"
         
         try:
-            response = requests.get(url, headers=headers, timeout=10).json()
+            response = requests.get(base_url, headers=headers, params={"date": date_string}, timeout=10).json()
             fixtures = response.get("response", [])
             
             for f in fixtures:
                 ligue_id = f.get("league", {}).get("id")
                 statut = f.get("fixture", {}).get("status", {}).get("short", "")
                 
-                # S'il s'agit d'une de nos ligues et que le match n'a pas commencé (ou est à définir/reporté)
                 if ligue_id in LIGUES_AUTORISEES and statut in ["NS", "TBD", "PST"]:
                     matchs_reels.append({
                         "home": f.get("teams", {}).get("home", {}).get("name"),
@@ -168,14 +177,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
         "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
-        "Analyses mathématiques pures basées sur le modèle Poisson étendu.",
+        "Analyses mathématiques pures basées sur le modèle Poisson étendu. Mode Filtre Premium activé.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan brut des programmations...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Tri sélectif des opportunités...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
@@ -198,7 +207,8 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• *Top Scores Exacts :* {', '.join(res['scores'])}\n"
                 f"• *Les deux marquent :* Oui ({res['btts']}%) | Non ({100 - res['btts']}%)\n"
                 f"• *Total Buts :* Plus de 2.5 ({res['over25']}%)\n\n"
-                f"💎 *FILTRE DE VALUE DETECTÉE :*\n"
+                f"💎 *FILTRE ULTRA-SÉLECTIF :*\n"
+                f"⚡ *Statut : {res['statut_validation']}*\n"
                 f"👉 *Option validée : {rec['nom']}*\n"
                 f"📊 Probabilité algorithmique : {rec['prob']}%\n"
                 f"📉 Notre Cote Cible : {rec['cote_th']}\n"
