@@ -28,7 +28,7 @@ def probabilite_poisson(k, laambda):
     if laambda <= 0: laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- MOTEUR DE CALCUL EXPERT EN MATRICE ÉTENDUE ---
+# --- MOTEUR DE CALCUL EXPERT ---
 def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league_id, date_match):
     url = "https://v3.football.api-sports.io/teams/statistics"
     headers = {
@@ -42,6 +42,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
     except:
         saison = 2026
     
+    # Valeurs par défaut si pas assez de stats
     lambda_home = 1.45  
     mu_away = 1.05
     
@@ -56,7 +57,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
             if form_home_goals: lambda_home = float(form_home_goals)
             if form_away_goals: mu_away = float(form_away_goals)
         except Exception as e:
-            logging.error(f"Erreur calculs stats API : {e}")
+            logging.error(f"Erreur stats API : {e}")
 
     prob_1, prob_N, prob_2 = 0.0, 0.0, 0.0
     prob_btts_oui, prob_over_25, prob_over_35 = 0.0, 0.0, 0.0
@@ -120,7 +121,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "statut_validation": statut_validation
     }
 
-# --- RECHERCHE AVEC GESTION DE DATE LOCALE ET LIGUES ÉLARGIES ---
+# --- RECHERCHE TOTALE (SANS AUCUN FILTRE DE LIGUE) ---
 def recuperer_vrais_matchs():
     if not API_FOOTBALL_KEY or API_FOOTBALL_KEY == "METS_TA_CLE_API_ICI":
         logging.warning("Clé API-Football manquante.")
@@ -132,43 +133,38 @@ def recuperer_vrais_matchs():
     }
     
     matchs_reels = []
-    # Extension temporaire des ligues pour capter du flux continu (Majeures + Actives)
-    LIGUES_AUTORISEES = [1, 2, 39, 61, 78, 135, 140, 71, 253, 103] 
     base_url = "https://v3.football.api-sports.io/fixtures"
     
-    # Utilisation d'un décalage fixe (+1 heure pour correspondre à ton fuseau local)
-    maintenant_local = dt.datetime.utcnow() + dt.timedelta(hours=1)
+    # Récupération de la date du jour (UTC)
+    date_string = dt.datetime.utcnow().strftime('%Y-%m-%d')
     
-    for i in range(3):
-        date_string = (maintenant_local + dt.timedelta(days=i)).strftime('%Y-%m-%d')
+    try:
+        # Recherche globale de tous les matchs de la journée sur toute la planète
+        response = requests.get(base_url, headers=headers, params={"date": date_string}, timeout=10).json()
+        fixtures = response.get("response", [])
         
-        try:
-            response = requests.get(base_url, headers=headers, params={"date": date_string}, timeout=10).json()
-            fixtures = response.get("response", [])
+        for f in fixtures:
+            statut = f.get("fixture", {}).get("status", {}).get("short", "")
             
-            for f in fixtures:
-                ligue_id = f.get("league", {}).get("id")
-                statut = f.get("fixture", {}).get("status", {}).get("short", "")
+            # On prend n'importe quel match non commencé disponible aujourd'hui
+            if statut in ["NS", "TBD"]:
+                matchs_reels.append({
+                    "home": f.get("teams", {}).get("home", {}).get("name"),
+                    "home_id": f.get("teams", {}).get("home", {}).get("id"),
+                    "away": f.get("teams", {}).get("away", {}).get("name"),
+                    "away_id": f.get("teams", {}).get("away", {}).get("id"),
+                    "league": f.get("league", {}).get("name", ""),
+                    "league_id": f.get("league", {}).get("id"),
+                    "date": f.get("fixture", {}).get("date")
+                })
                 
-                if ligue_id in LIGUES_AUTORISEES and statut in ["NS", "TBD", "PST"]:
-                    matchs_reels.append({
-                        "home": f.get("teams", {}).get("home", {}).get("name"),
-                        "home_id": f.get("teams", {}).get("home", {}).get("id"),
-                        "away": f.get("teams", {}).get("away", {}).get("name"),
-                        "away_id": f.get("teams", {}).get("away", {}).get("id"),
-                        "league": f.get("league", {}).get("name", ""),
-                        "league_id": ligue_id,
-                        "date": f.get("fixture", {}).get("date")
-                    })
-                    
-                if len(matchs_reels) >= 6:
-                    break
-            if len(matchs_reels) >= 6:
+            # Limite à 5 matchs pour ne pas saturer ton compte API gratuit
+            if len(matchs_reels) >= 5:
                 break
-                
-        except Exception as e:
-            logging.error(f"Erreur lors du scan du {date_string} : {e}")
             
+    except Exception as e:
+        logging.error(f"Erreur lors du scan global : {e}")
+        
     return matchs_reels
 
 # --- INTERFACE TELEGRAM ---
@@ -177,19 +173,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
         "🧠 *Bienvenue sur ton Bot Prono IA Algorithmique Multi-Matchs.*\n\n"
-        "Analyses mathématiques pures basées sur le modèle Poisson étendu. Mode Filtre Premium activé.",
+        "Mode Scan Global activé (Filtre Premium Intransigeant).",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan synchronisé sur ton fuseau horaire...")
+        await update.message.reply_text("🕵️‍♂️ Modélisation matricielle en cours... Scan global de la planète Football...")
         
         matchs_du_jour = recuperer_vrais_matchs()
         
         if not matchs_du_jour:
-            await update.message.reply_text("ℹ️ *Aucun match disponible* dans la base de données pour tes compétitions sur les prochaines 72h.", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match disponible aujourd'hui* dans la base mondiale de l'API.", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_du_jour, 1):
