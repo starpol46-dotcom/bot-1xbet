@@ -23,17 +23,10 @@ def nettoyer_variable(nom_variable):
 TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 
-# --- CATALOGUE DE LIGUES (D1 + SÉLECTION D2 DEMANDÉES) ---
+# --- LISTE DES LIGUES FILTRÉES ---
 LIGUES_AUTORISEES = [
-    # Grandes compétitions nationales & internationales
-    1, 2, 3, 531, 
-    # Europe D1
-    39, 140, 135, 78, 61, 94, 88, 144, 40, 119, 
-    # Amériques D1
-    253, 262, 71, 103, 239, 113, 
-    # Asie D1 (Avec Chine Super League incluse)
-    98, 292, 307, 279,
-    # D2 Spécifiques
+    1, 2, 3, 531, 39, 140, 135, 78, 61, 94, 88, 144, 40, 119, 
+    253, 262, 71, 103, 239, 113, 98, 292, 307, 279,
     72, 104, 100, 105, 120, 145, 209
 ]
 
@@ -41,7 +34,7 @@ def probabilite_poisson(k, laambda):
     if laambda <= 0: laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- RECUPERATION VIA LE CLASSEMENT EN CAS DE SÉCURITÉ ---
+# --- RECHERCHE CLASSEMENT (VRAIE SAISON LOGIQUE) ---
 def recuperer_buts_via_classement(league_id, season, team_id):
     url = "https://v3.football.api-sports.io/standings"
     headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
@@ -58,22 +51,17 @@ def recuperer_buts_via_classement(league_id, season, team_id):
         pass
     return None
 
-# --- MOTEUR EXPERT STRICT ---
-def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league_id, date_match):
+# --- MOTEUR DE CALCUL EXPERT CORRIGÉ ---
+def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league_id, saison):
     url = "https://v3.football.api-sports.io/teams/statistics"
     headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
-    
-    try:
-        date_obj = dt.datetime.strptime(date_match.split('T')[0], '%Y-%m-%d')
-        saison = date_obj.year
-    except:
-        saison = 2026
     
     lambda_home = None
     mu_away = None
     
     if team_home_id and team_away_id and API_FOOTBALL_KEY:
         try:
+            # On demande la saison exacte fournie par le calendrier officiel de l'API
             res_home = requests.get(f"{url}?league={league_id}&season={saison}&team={team_home_id}", headers=headers, timeout=5).json()
             res_away = requests.get(f"{url}?league={league_id}&season={saison}&team={team_away_id}", headers=headers, timeout=5).json()
             
@@ -85,13 +73,13 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         except:
             pass
 
-        # Solution de secours n°2 : Si l'API renvoie vide, on interroge le classement général de la ligue
-        if lambda_home is None:
+        # Secours par classement (sur la bonne saison reçue)
+        if lambda_home is None or lambda_home == 0:
             lambda_home = recuperer_buts_via_classement(league_id, saison, team_home_id)
-        if mu_away is None:
+        if mu_away is None or mu_away == 0:
             mu_away = recuperer_buts_via_classement(league_id, saison, team_away_id)
 
-    # REJET STRICT : Si aucune stat réelle n'est disponible nulle part, on élimine le match
+    # REJET SI TOUJOURS VIDE
     if lambda_home is None or mu_away is None or lambda_home == 0 or mu_away == 0:
         return None
 
@@ -140,7 +128,7 @@ def analyser_match_expert(team_home_id, team_away_id, nom_home, nom_away, league
         "recommandation": recommendation
     }
 
-# --- SCANNER DE MATCHS ---
+# --- SCANNER CORRIGÉ SANS ESTIMATION ---
 def recuperer_matchs_premium():
     if not API_FOOTBALL_KEY: return []
     headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
@@ -153,6 +141,7 @@ def recuperer_matchs_premium():
         
         for f in fixtures:
             league_id = f.get("league", {}).get("id")
+            saison_officielle = f.get("league", {}).get("season") # Extraction directe de la bonne saison (ex: 2025)
             statut = f.get("fixture", {}).get("status", {}).get("short", "")
             home_name = f.get("teams", {}).get("home", {}).get("name", "")
             away_name = f.get("teams", {}).get("away", {}).get("name", "")
@@ -160,14 +149,14 @@ def recuperer_matchs_premium():
             mots_bloques = [" II", " B", " Reserve", " U21", " U23", " Sub-"]
             est_reserve = any(mi in home_name or mi in away_name for mi in mots_bloques)
             
-            if league_id in LIGUES_AUTORISEES and statut == "NS" and not est_reserve:
+            if league_id in LIGUES_AUTORISEES and statut == "NS" and not est_reserve and saison_officielle:
                 analyse = analyser_match_expert(
                     f.get("teams", {}).get("home", {}).get("id"),
                     f.get("teams", {}).get("away", {}).get("id"),
-                    home_name, away_name, league_id, f.get("fixture", {}).get("date")
+                    home_name, away_name, league_id, saison_officielle
                 )
                 
-                if json_contient_data := (analyse is not None):
+                if analyse:
                     matchs_reels.append({
                         "home": home_name, "away": away_name,
                         "league": f.get("league", {}).get("name", ""),
@@ -181,24 +170,24 @@ def recuperer_matchs_premium():
         logging.error(f"Erreur scan : {e}")
     return matchs_reels
 
-# --- INTERFACE ---
+# --- INTERFACE TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
-        "🧠 *Moteur IA Statistique Réel (Anti-Biais) Activé.*\n\n"
-        "Seuls les matchs avec de vraies statistiques vérifiées seront analysés.",
+        "🧠 *Moteur IA Alignée sur l'API Activé.*\n\n"
+        "Correction des saisons effectuée. Les analyses réelles vont s'afficher.",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("⏳ Scan approfondi des championnats actifs (Vraies stats uniquement)...")
+        await update.message.reply_text("⏳ Scan des matchs de la journée en cours...")
         matchs_valides = recuperer_matchs_premium()
         
         if not matchs_valides:
-            await update.message.reply_text("ℹ️ *Aucun match de notre liste ne possède de données réelles exploitables pour le moment.*", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match de la liste n'est programmé ou disponible aujourd'hui.*", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_valides, 1):
@@ -207,15 +196,15 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             message_match = (
                 f"⚔️ *MATCH {idx}/{len(matchs_valides)} : {m['home']} vs {m['away']}*\n"
                 f"🌍 Compétition : *{m['country']} - {m['league']}*\n\n"
-                f"📈 *Probabilités Réelles (Loi de Poisson) :*\n"
+                f"📈 *Probabilités Réelles :*\n"
                 f"• *1 :* {res['p1']}% (Cote : {res['cote_th1']})\n"
                 f"• *N :* {res['pN']}% (Cote : {res['cote_thN']})\n"
                 f"• *2 :* {res['p2']}% (Cote : {res['cote_th2']})\n\n"
-                f"🎯 *Détails du Calcul :*\n"
+                f"🎯 *Calcul de Poisson :*\n"
                 f"• *Scores Probables :* {', '.join(res['scores'])}\n"
                 f"• *Les deux marquent :* {res['btts']}% | *Plus de 2.5 Buts :* {res['over25']}%\n\n"
-                f"💎 *OPTION SÉLECTIONNÉE :*\n"
-                f"👉 *Pronostic : {rec['nom']}*\n"
+                f"💎 *PRONOSTIC DU MATCH :*\n"
+                f"👉 *{rec['nom']}*\n"
                 f"📊 Indice de Confiance : {rec['prob']}%\n"
                 f"📉 Cote théorique : {rec['cote_th']}\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
