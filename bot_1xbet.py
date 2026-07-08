@@ -23,72 +23,71 @@ def nettoyer_variable(nom_variable):
 TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 
-# --- CATALOGUE DES LIGUES MAJEURES (Critère 1) ---
-LIGUES_MAJEURES = [
-    1, 2, 3, 531,         # Coupe du Monde, Euro, LDC, Copa America
-    39, 140, 135, 78, 61, # Premier League, LaLiga, Serie A, Bundesliga, Ligue 1
-    94, 88, 144, 40, 119, # Eredivisie, Pro League, Championship, Primeira Liga, Serie A (Brésil)
-    253, 262, 71, 103,    # MLS, Liga MX, Serie A (Equateur), Primera Division (Argentine)
-    98, 292, 307, 279     # J1 League, K League 1, Super League Chinoise, Saudi Pro League
-]
-
 def probabilite_poisson(k, laambda):
     if laambda <= 0: laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- RECHERCHE ET ANALYSE AVANCÉE (Critères 2, 3, 5, 6) ---
-def analyser_rencontre_complete(fixture_id, team_home, team_away, league_id, saison):
+# --- MOTEUR D'ANALYSE UNIVERSEL ---
+def analyser_rencontre_universel(fixture_id, team_home_id, team_away_id, nom_home, nom_away):
     headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     
-    # 1. Récupération des prédictions & Modèles de référence (Critère 5)
-    url_pred = f"https://v3.football.api-sports.io/predictions?fixture={fixture_id}"
-    try:
-        res_pred = requests.get(url_pred, headers=headers, timeout=6).json()
-        pred_data = res_pred.get("response", [])[0] if res_pred.get("response") else None
-    except:
-        pred_data = None
+    lambda_home, mu_away = None, None
+    conseil = "Analyse basée sur l'historique récent des équipes"
+    gagnant_pred = "Équilibré"
+    arguments = []
 
-    # REJET STRICT : Si aucun modèle ou donnée historique réelle n'est accessible, on n'invente rien.
-    if not pred_data:
+    # Étape 1 : Tentative via le modèle algorithmique natif de l'API
+    try:
+        url_pred = f"https://v3.football.api-sports.io/predictions?fixture={fixture_id}"
+        res_pred = requests.get(url_pred, headers=headers, timeout=5).json()
+        if res_pred.get("response"):
+            pred_data = res_pred["response"][0]
+            teams_stats = pred_data.get("teams", {})
+            comparison = pred_data.get("comparison", {})
+            
+            lambda_home = float(teams_stats["home"]["league"]["goals"]["for"]["average"]["total"])
+            mu_away = float(teams_stats["away"]["league"]["goals"]["for"]["average"]["total"])
+            
+            conseil = pred_data.get("predictions", {}).get("advice", conseil)
+            gagnant_pred = pred_data.get("predictions", {}).get("winner", {}).get("name", gagnant_pred)
+            arguments.append(f"Dynamique : Dom {comparison.get('form', {}).get('home', '50%')} vs Ext {comparison.get('form', {}).get('away', '50%')}")
+    except:
+        pass
+
+    # Étape 2 : Repli sur l'historique réel si le modèle de la ligue est vierge (Cas de la pré-saison / LDC préliminaire)
+    if not lambda_home or not mu_away or lambda_home == 0 or mu_away == 0:
+        try:
+            url_team_home = f"https://v3.football.api-sports.io/fixtures?team={team_home_id}&last=5"
+            url_team_away = f"https://v3.football.api-sports.io/fixtures?team={team_away_id}&last=5"
+            
+            res_h = requests.get(url_team_home, headers=headers, timeout=5).json().get("response", [])
+            res_a = requests.get(url_team_away, headers=headers, timeout=5).json().get("response", [])
+            
+            if res_h and res_a:
+                # Calcul de la moyenne réelle sur les 5 derniers matchs de chaque équipe
+                buts_h = sum([f["goals"]["home"] for f in res_h if f["teams"]["home"]["id"] == team_home_id and f["goals"]["home"] is not None])
+                buts_h += sum([f["goals"]["away"] for f in res_h if f["teams"]["away"]["id"] == team_home_id and f["goals"]["away"] is not None])
+                
+                buts_a = sum([f["goals"]["home"] for f in res_a if f["teams"]["home"]["id"] == team_away_id and f["goals"]["home"] is not None])
+                buts_a += sum([f["goals"]["away"] for f in res_a if f["teams"]["away"]["id"] == team_away_id and f["goals"]["away"] is not None])
+                
+                lambda_home = round(buts_h / len(res_h), 2)
+                mu_away = round(buts_a / len(res_a), 2)
+                arguments.append(f"Moyenne de buts réelle calculée sur les 5 derniers matchs historiques.")
+        except:
+            return None
+
+    # Rejet final si aucune donnée historique n'existe nulle part
+    if not lambda_home or not mu_away or lambda_home == 0 or mu_away == 0:
         return None
 
-    # Extraction des forces et dynamiques réelles (Critère 3)
-    comparison = pred_data.get("comparison", {})
-    h2h_stats = pred_data.get("h2h", [])
-    
-    # Récupération des buts récents et clean sheets sur la forme actuelle (Critère 3)
-    teams_stats = pred_data.get("teams", {})
-    
-    # Loi de Poisson basée sur les buts réels marqués/encaissés par match de la saison (Critère 3)
-    try:
-        lambda_home = float(teams_stats["home"]["league"]["goals"]["for"]["average"]["total"])
-        mu_away = float(teams_stats["away"]["league"]["goals"]["for"]["average"]["total"])
-    except:
-        return None # Pas de statistiques réelles de buts = Rejet strict
-
-    if lambda_home == 0 or mu_away == 0:
-        return None
-
-    # 2. Analyse H2H (Critère 2)
-    total_h2h = len(h2h_stats)
-    home_win_h2h = 0
-    if total_h2h > 0:
-        for match in h2h_stats:
-            if match.get("teams", {}).get("home", {}).get("winner") and match["teams"]["home"]["id"] == team_home["id"]:
-                home_win_h2h += 1
-            elif match.get("teams", {}).get("away", {}).get("winner") and match["teams"]["away"]["id"] == team_home["id"]:
-                home_win_h2h += 1
-        pct_h2h_home = int((home_win_h2h / total_h2h) * 100)
-    else:
-        pct_h2h_home = 50 # Neutre si pas de passif commun
-
-    # 3. Calcul des probabilités par Poisson
+    # Calcul Poisson
     prob_1, prob_N, prob_2 = 0.0, 0.0, 0.0
     prob_btts, prob_over25 = 0.0, 0.0
     scores = {}
     
-    for h in range(7):
-        for a in range(7):
+    for h in range(6):
+        for a in range(6):
             p_h = probabilite_poisson(h, lambda_home)
             p_a = probabilite_poisson(a, mu_away)
             p_score = p_h * p_a
@@ -102,20 +101,9 @@ def analyser_rencontre_complete(fixture_id, team_home, team_away, league_id, sai
     scores_tries = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     top_scores = [f"{sc[0]} ({round(sc[1]*100, 1)}%)" for sc in scores_tries[:2]]
 
-    # 4. Synthèse Algorithmique et Argumentation (Critère 7)
-    conseil = pred_data.get("predictions", {}).get("advice", "Aucun avis fort")
-    gagnant_pred = pred_data.get("predictions", {}).get("winner", {}).get("name", "Indéterminé")
-    
-    # Formulation des arguments
-    arguments = [
-        f"Forme : Dom {comparison.get('form', {}).get('home', '0%')} vs Ext {comparison.get('form', {}).get('away', '0%')}.",
-        f"Attaque/Défense : Supériorité offensive estimée à {comparison.get('att', {}).get('home', '50%')} pour le camp local.",
-        f"Confrontations directes : L'équipe à domicile a remporté {pct_h2h_home}% des récents face-à-face directs."
-    ]
-
     options = [
-        {"nom": f"Victoire {team_home['name']}", "prob": int(prob_1 * 100)},
-        {"nom": f"Victoire {team_away['name']}", "prob": int(prob_2 * 100)},
+        {"nom": f"Victoire {nom_home}", "prob": int(prob_1 * 100)},
+        {"nom": f"Victoire {nom_away}", "prob": int(prob_2 * 100)},
         {"nom": "Les deux équipes marquent", "prob": int(prob_btts * 100)},
         {"nom": "Plus de 2.5 Buts", "prob": int(prob_over25 * 100)}
     ]
@@ -128,61 +116,59 @@ def analyser_rencontre_complete(fixture_id, team_home, team_away, league_id, sai
         "arguments": arguments, "recommandation": recommendation
     }
 
-# --- CRITÈRE 1 : IDENTIFICATION DES RENCONTRES (AUGMENTATION À 8 MATCHS) ---
-def recuperer_rencontres_majeures():
+# --- SCANNER TOTAL DU JOUR ---
+def recuperer_matchs_du_jour():
     if not API_FOOTBALL_KEY: return []
     headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
     matchs_analyses = []
     date_string = dt.datetime.utcnow().strftime('%Y-%m-%d')
     
     try:
-        # Recherche exclusive des fixtures du jour
         response = requests.get("https://v3.football.api-sports.io/fixtures", headers=headers, params={"date": date_string}, timeout=10).json()
         fixtures = response.get("response", [])
         
         for f in fixtures:
-            league_id = f.get("league", {}).get("id")
             statut = f.get("fixture", {}).get("status", {}).get("short", "")
-            saison = f.get("league", {}).get("season")
             
-            # Filtrer rigoureusement sur les ligues majeures et matchs non commencés (Critère 1)
-            if league_id in LIGUES_MAJEURES and statut == "NS" and saison:
+            # On prend tous les matchs non commencés (LDC, Conférence, Amicaux inclus !)
+            if statut == "NS":
                 home = f.get("teams", {}).get("home", {})
                 away = f.get("teams", {}).get("away", {})
                 
-                analyse = analyser_rencontre_complete(f["fixture"]["id"], home, away, league_id, saison)
+                analyse = analyser_rencontre_universel(f["fixture"]["id"], home["id"], away["id"], home["name"], away["name"])
                 
                 if analyse:
                     matchs_analyses.append({
                         "home": home["name"], "away": away["name"],
                         "league": f["league"]["name"], "country": f["league"]["country"],
-                        "details": f.get("fixture", {}).get("venue", {}).get("name", "Stade inconnu"), # Lieu (Critère 6)
+                        "details": f.get("fixture", {}).get("venue", {}).get("name", "Stade non spécifié"),
                         "analyse": analyse
                     })
-            # CHANGEMENT ICI : Augmentation de la limite à 8 matchs maximum pour en garantir au moins 7
+            
+            # Changement : On s'assure d'obtenir au moins 7 à 8 prédictions solides
             if len(matchs_analyses) >= 8:
                 break
     except Exception as e:
-        logging.error(f"Erreur lors du scan : {e}")
+        logging.error(f"Erreur lors du scan global : {e}")
     return matchs_analyses
 
-# --- INTERFACE BOT TELEGRAM (Critère 7) ---
+# --- INTERFACE BOT TELEGRAM ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
-        "🔬 *Moteur d'Analyse Football Rigoureux & Robustesse Algorithmique.*\n\n"
-        "Aucune approximation. Recherche configurée pour lister au moins 7 analyses majeures complètes.",
+        "🚀 *Moteur d'Analyse Global Activé.*\n\n"
+        "Inclusion de la Ligue des Champions, Conférence League et Matchs de Pré-Saison !",
         reply_markup=reply_markup, parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("⏳ Synthèse des indicateurs fiables en cours (0% supposition, objectif : au moins 7 matchs)...")
-        matchs_valides = recuperer_rencontres_majeures()
+        await update.message.reply_text("⏳ Analyse en cours des compétitions européennes et amicales du jour...")
+        matchs_valides = recuperer_matchs_du_jour()
         
         if not matchs_valides:
-            await update.message.reply_text("ℹ️ *Aucune rencontre majeure du jour ne dispose de données historiques complètes exploitables.*", parse_mode="Markdown")
+            await update.message.reply_text("ℹ️ *Aucun match disponible avec des données historiques suffisantes aujourd'hui.*", parse_mode="Markdown")
             return
         
         for idx, m in enumerate(matchs_valides, 1):
@@ -191,19 +177,19 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             args_str = "\n".join([f"• {arg}" for arg in res["arguments"]])
             
             message_match = (
-                f"⚔️ *MATCH MAJEUR {idx}/{len(matchs_valides)} : {m['home']} vs {m['away']}*\n"
+                f"⚔️ *MATCH {idx}/{len(matchs_valides)} : {m['home']} vs {m['away']}*\n"
                 f"🌍 Compétition : *{m['country']} - {m['league']}*\n"
-                f"📍 Lieu de la rencontre : {m['details']}\n\n"
-                f"📊 *Indicateurs Statistiques Réels :*\n"
-                f"• Probabilité 1 : {res['p1']}%\n"
-                f"• Probabilité N : {res['pN']}%\n"
-                f"• Probabilité 2 : {res['p2']}%\n"
+                f"📍 Lieu : {m['details']}\n\n"
+                f"📊 *Probabilités Statistiques :*\n"
+                f"• Victoire Dom (1) : {res['p1']}%\n"
+                f"• Match Nul (N) : {res['pN']}%\n"
+                f"• Victoire Ext (2) : {res['p2']}%\n"
                 f"• Scores probables : {', '.join(res['scores'])}\n"
-                f"• BTTS : {res['btts']}% | Over 2.5 : {res['over25']}%\n\n"
-                f"🧠 *Synthèse & Modèles de Référence :*\n"
+                f"• Les deux marquent : {res['btts']}% | Over 2.5 : {res['over25']}%\n\n"
+                f"🧠 *Indicateurs & Synthèse :*\n"
                 f"{args_str}\n"
-                f"💬 Avis Tendanciel : {res['conseil_expert']} (Axe : {res['distribution']})\n\n"
-                f"🎯 *PRONOSTIC RETENU (Plus Haute Probabilité) :*\n"
+                f"💬 Tendance : {res['conseil_expert']}\n\n"
+                f"🎯 *PRONOSTIC RETENU :*\n"
                 f"👉 *{rec['nom']} ({rec['prob']}% de confiance)*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
