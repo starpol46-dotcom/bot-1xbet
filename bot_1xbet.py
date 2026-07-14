@@ -25,8 +25,8 @@ TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 BASE_URL = "https://v3.football.api-sports.io"
 
-# ID des ligues majeures pour éviter d'analyser des ligues mineures inconnues
-LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]  # PL, L1, LaLiga, Serie A, Bundesliga, UCL, UEL, Coupe du Monde
+# ID des ligues majeures pour cibler uniquement des compétitions fiables
+LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]  # Premier League, Ligue 1, LaLiga, Serie A, Bundesliga, UCL, UEL, Coupe du Monde
 
 def probabilite_poisson(k, laambda):
     if laambda <= 0: 
@@ -93,7 +93,7 @@ async def recuperer_matchs_du_jour():
         'x-rapidapi-host': 'v3.football.api-sports.io'
     }
     
-    # Correction de la date en local
+    # Date du jour dynamique
     date_string = dt.datetime.now().strftime('%Y-%m-%d')
     matchs_analyses = []
     
@@ -110,39 +110,37 @@ async def recuperer_matchs_du_jour():
                 data = await resp.json()
                 fixtures = data.get("response", [])
                 
-                # Filtrage des matchs sur les ligues majeures cibles et non commencés (NS)
+                # Filtrage : Matchs non commencés (NS) appartenant à nos ligues cibles
                 fixtures_filtrees = [
                     f for f in fixtures 
                     if f.get("league", {}).get("id") in LIGUES_CIBLES 
                     and f.get("fixture", {}).get("status", {}).get("short") == "NS"
                 ]
                 
-                # Traitement des 3 meilleures affiches pour optimiser les appels API
+                # Limitation aux 3 plus grandes affiches du jour pour préserver le quota d'appels API
                 for f in fixtures_filtrees[:3]:
                     fixture_id = f["fixture"]["id"]
                     home = f["teams"]["home"]
                     away = f["teams"]["away"]
                     league = f["league"]
                     
-                    # Récupération des statistiques avancées de l'API
                     prediction_data = await fetch_predictions_pour_match(session, fixture_id, headers)
                     
                     if prediction_data:
-                        # Critère 3 : xG et Efficacité / Moyennes réelles
+                        # Extraction des moyennes de buts réelles sur la saison en cours (Split Form)
                         stats_home = prediction_data.get("teams", {}).get("home", {}).get("league", {}).get("goals", {})
                         stats_away = prediction_data.get("teams", {}).get("away", {}).get("league", {}).get("goals", {})
                         
                         goals_home_avg = stats_home.get("for", {}).get("average", {}).get("home", 1.40)
                         goals_away_avg = stats_away.get("for", {}).get("average", {}).get("away", 1.20)
                         
-                        # Calcul de notre modèle Poisson local avec les vrais chiffres
+                        # Exécution du modèle de Poisson
                         poisson = executer_modele_poisson(goals_home_avg, goals_away_avg, home["name"], away["name"])
                         
-                        # Critère 7 : Modèle d'ensemble (Comparaison des prédictions natives API vs Poisson)
-                        api_advice = prediction_data.get("predictions", {}).get("advice", "Pas de conseil")
+                        # Récupération des analyses et pourcentages natifs de l'API (Modèle d'ensemble)
+                        api_advice = prediction_data.get("predictions", {}).get("advice", "Pas de conseil spécifique")
                         percent_api = prediction_data.get("predictions", {}).get("percent", {})
                         
-                        # Synthèse de la décision (Critère 8)
                         matchs_analyses.append({
                             "home": home["name"],
                             "away": away["name"],
@@ -153,7 +151,7 @@ async def recuperer_matchs_du_jour():
                             "poisson": poisson,
                             "api_advice": api_advice,
                             "api_percent": percent_api,
-                            "h2h": prediction_data.get("h2h", [])[:3]  # Récupération des confrontations directes
+                            "h2h": prediction_data.get("h2h", [])[:3]
                         })
                         
         except Exception as e:
@@ -178,7 +176,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         if not matchs_valides:
             await update.message.reply_text(
-                "ℹ️ *Aucun match programmé dans les ligues cibles pour aujourd'hui.*", 
+                "ℹ️ *Aucun match majeur programmé trouvé pour aujourd'hui.*", 
                 parse_mode="Markdown"
             )
             return
@@ -187,7 +185,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             poi = m["poisson"]
             api_pct = m["api_percent"]
             
-            # Formater l'historique H2H
+            # Formatage de l'historique H2H
             h2h_text = ""
             for h in m["h2h"]:
                 h_home = h.get("teams", {}).get("home", {}).get("name", "")
@@ -220,7 +218,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(message_match, parse_mode="Markdown")
             await asyncio.sleep(1)
 
-# --- SERVEUR WEB ASYNC ---
+# --- SERVEUR WEB ASYNC (ÉVITE LE CRASH PORT SUR RENDER) ---
 async def handle_ping(request): 
     return web.Response(text="Bot en ligne")
 
@@ -231,7 +229,7 @@ async def main():
 
     token_propre = "".join(TOKEN.split())
     
-    # Configuration du serveur web
+    # Configuration et lancement du serveur web
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     runner = web.AppRunner(web_app)
@@ -242,7 +240,7 @@ async def main():
     await site.start()
     logger.info(f"Serveur web démarré sur le port {port}")
 
-    # Initialisation du bot Telegram
+    # Initialisation de l'application Telegram
     application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
@@ -251,9 +249,8 @@ async def main():
         await application.initialize()
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-        logger.info("Le bot Telegram est démarré et écoute les messages.")
+        logger.info("Le bot Telegram écoute activement les requêtes.")
         
-        # Garde l'application active au sein de la même boucle
         while True: 
             await asyncio.sleep(3600)
 
