@@ -26,14 +26,14 @@ API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 BASE_URL = "https://v3.football.api-sports.io"
 
 # ID des ligues majeures pour cibler en priorité les compétitions d'élite
-LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]  # Premier League, Ligue 1, LaLiga, Serie A, Bundesliga, UCL, UEL, Coupe du Monde
+LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]
 
 def probabilite_poisson(k, laambda):
     if laambda <= 0: 
         laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- CALCULATEUR DE POISSON DE SÉCURITÉ ---
+# --- CALCULATEUR DE POISSON ---
 def executer_modele_poisson(goals_home_avg, goals_away_avg, nom_home, nom_away):
     lambda_home = float(goals_home_avg) if goals_home_avg else 1.40
     mu_away = float(goals_away_avg) if goals_away_avg else 1.20
@@ -68,7 +68,7 @@ def executer_modele_poisson(goals_home_avg, goals_away_avg, nom_home, nom_away):
         "mu": round(mu_away, 2)
     }
 
-# --- EXTRACTEUR DE DONNÉES ET DE PRÉDICTIONS NATIVES ---
+# --- EXTRACTEUR DE DONNÉES ---
 async def fetch_predictions_pour_match(session, fixture_id, headers):
     url = f"{BASE_URL}/predictions"
     params = {"fixture": fixture_id}
@@ -109,22 +109,22 @@ async def recuperer_matchs_du_jour():
                 data = await resp.json()
                 fixtures = data.get("response", [])
                 
-                # 1. Étape de filtrage : On cherche d'abord les matchs non commencés (NS) des ligues d'élite
+                # 1. On cherche d'abord dans les ligues d'élite
                 fixtures_filtrees = [
                     f for f in fixtures 
                     if f.get("league", {}).get("id") in LIGUES_CIBLES 
                     and f.get("fixture", {}).get("status", {}).get("short") == "NS"
                 ]
                 
-                # 2. Étape de repli : S'il n'y a aucun match d'élite programmé (ex: tard le soir), on prend n'importe quel match disponible
+                # 2. Repli : si vide, on prend toutes les ligues disponibles
                 if not fixtures_filtrees:
-                    logger.info("Aucun match d'élite trouvé. Élargissement de la recherche à toutes les compétitions disponibles...")
+                    logger.info("Recherche élargie...")
                     fixtures_filtrees = [
                         f for f in fixtures 
                         if f.get("fixture", {}).get("status", {}).get("short") == "NS"
                     ]
                 
-                # Limitation aux 3 premiers matchs trouvés pour économiser tes requêtes API quotidiennes
+                # On limite aux 3 premiers matchs pour économiser l'API
                 for f in fixtures_filtrees[:3]:
                     fixture_id = f["fixture"]["id"]
                     home = f["teams"]["home"]
@@ -133,6 +133,13 @@ async def recuperer_matchs_du_jour():
                     
                     prediction_data = await fetch_predictions_pour_match(session, fixture_id, headers)
                     
+                    # Valeurs par défaut sécurisées au cas où l'API n'a pas de prédiction pour ce match
+                    goals_home_avg = 1.40
+                    goals_away_avg = 1.20
+                    api_advice = "Double chance (Calcul local)"
+                    percent_api = {"home": "33", "draw": "33", "away": "33"}
+                    h2h_list = []
+
                     if prediction_data:
                         stats_home = prediction_data.get("teams", {}).get("home", {}).get("league", {}).get("goals", {})
                         stats_away = prediction_data.get("teams", {}).get("away", {}).get("league", {}).get("goals", {})
@@ -140,23 +147,25 @@ async def recuperer_matchs_du_jour():
                         goals_home_avg = stats_home.get("for", {}).get("average", {}).get("home", 1.40)
                         goals_away_avg = stats_away.get("for", {}).get("average", {}).get("away", 1.20)
                         
-                        poisson = executer_modele_poisson(goals_home_avg, goals_away_avg, home["name"], away["name"])
-                        
-                        api_advice = prediction_data.get("predictions", {}).get("advice", "Pas de conseil spécifique")
-                        percent_api = prediction_data.get("predictions", {}).get("percent", {})
-                        
-                        matchs_analyses.append({
-                            "home": home["name"],
-                            "away": away["name"],
-                            "league": league.get("name", "Ligue"),
-                            "country": league.get("country", "Monde"),
-                            "heure": f.get("fixture", {}).get("date", "")[11:16],
-                            "stade": f.get("fixture", {}).get("venue", {}).get("name", "Stade non spécifié"),
-                            "poisson": poisson,
-                            "api_advice": api_advice,
-                            "api_percent": percent_api,
-                            "h2h": prediction_data.get("h2h", [])[:3]
-                        })
+                        api_advice = prediction_data.get("predictions", {}).get("advice", "Analyse neutre")
+                        percent_api = prediction_data.get("predictions", {}).get("percent", {"home": "33", "draw": "33", "away": "33"})
+                        h2h_list = prediction_data.get("h2h", [])[:3]
+                    
+                    # Calcul Poisson (tourne toujours, même sans données API tierces !)
+                    poisson = executer_modele_poisson(goals_home_avg, goals_away_avg, home["name"], away["name"])
+                    
+                    matchs_analyses.append({
+                        "home": home["name"],
+                        "away": away["name"],
+                        "league": league.get("name", "Ligue"),
+                        "country": league.get("country", "Monde"),
+                        "heure": f.get("fixture", {}).get("date", "")[11:16],
+                        "stade": f.get("fixture", {}).get("venue", {}).get("name", "Stade non spécifié"),
+                        "poisson": poisson,
+                        "api_advice": api_advice,
+                        "api_percent": percent_api,
+                        "h2h": h2h_list
+                    })
                         
         except Exception as e:
             logger.error(f"Erreur globale lors du scan : {e}")
@@ -169,18 +178,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
         "⚡ *Moteur IA Ultra-Précis Activé.*\n\n"
-        "Prêt à analyser les meilleures affiches du jour en combinant les modèles de Poisson et les données prédictives natives.",
+        "Prêt à analyser les meilleures affiches du jour en combinant les modèles de Poisson et les données prédictives.",
         reply_markup=reply_markup, parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("⏳ Scan, extraction et calcul des probabilités réelles en cours...")
+        await update.message.reply_text("⏳ Scan, extraction et calcul des probabilités en cours...")
         matchs_valides = await recuperer_matchs_du_jour()
         
         if not matchs_valides:
             await update.message.reply_text(
-                "ℹ️ *Aucun match programmé trouvé (même dans les ligues secondaires) pour aujourd'hui.*", 
+                "ℹ️ *Aucun match restant à jouer aujourd'hui sur l'API.*", 
                 parse_mode="Markdown"
             )
             return
@@ -197,7 +206,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 h2h_text += f"• {h_home} {h_score.get('home', '?')}-{h_score.get('away', '?')} {h_away}\n"
             
             if not h2h_text:
-                h2h_text = "Aucun historique récent trouvé."
+                h2h_text = "Aucun historique disponible pour ces équipes."
 
             message_match = (
                 f"⚔️ *MATCH {idx}/{len(matchs_valides)} : {m['home']} vs {m['away']}*\n"
@@ -209,9 +218,9 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"• Victoire {m['away']} : {poi['p2']}%\n"
                 f"• Scores probables : {', '.join(poi['scores'])}\n"
                 f"• Les deux marquent : {poi['btts']}% | Plus de 2.5 : {poi['over25']}%\n\n"
-                f"📉 *2) Données API Natives :*\n"
-                f"• Répartition API : {api_pct.get('home', '33')}% | {api_pct.get('draw', '33')}% | {api_pct.get('away', '33')}%\n"
-                f"• Indice de confiance BTTS / Over : {m.get('api_advice', 'N/A')}\n\n"
+                f"📉 *2) Données Prédictives :*\n"
+                f"• Distribution : {api_pct.get('home', '33')}% | {api_pct.get('draw', '33')}% | {api_pct.get('away', '33')}%\n"
+                f"• Tendance : {m.get('api_advice', 'N/A')}\n\n"
                 f"🔄 *3) Confrontations Directes (H2H) :*\n"
                 f"{h2h_text}\n"
                 f"🎯 *SYNTHÈSE DU MODÈLE ENSEMBLE :*\n"
@@ -240,7 +249,6 @@ async def main():
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"Serveur web démarré sur le port {port}")
 
     application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
@@ -250,7 +258,6 @@ async def main():
         await application.initialize()
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-        logger.info("Le bot Telegram écoute activement les requêtes.")
         
         while True: 
             await asyncio.sleep(3600)
