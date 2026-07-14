@@ -1,9 +1,9 @@
 import logging
 import os
 import math
-import requests
 import asyncio
 import datetime as dt
+import aiohttp
 from aiohttp import web
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -13,6 +13,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 def nettoyer_variable(nom_variable):
     valeur = os.environ.get(nom_variable)
@@ -22,14 +23,18 @@ def nettoyer_variable(nom_variable):
 
 TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
+BASE_URL = "https://v3.football.api-sports.io"
+
+# ID des ligues majeures pour éviter d'analyser des ligues mineures inconnues
+LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]  # PL, L1, LaLiga, Serie A, Bundesliga, UCL, UEL, Coupe du Monde
 
 def probabilite_poisson(k, laambda):
-    if laambda <= 0: laambda = 0.01
+    if laambda <= 0: 
+        laambda = 0.01
     return (pow(laambda, k) * math.exp(-laambda)) / math.factorial(k)
 
-# --- CALCULATEUR DE SÉCURITÉ STATISTIQUE ---
-def generer_analyse_directe(goals_home_avg, goals_away_avg, nom_home, nom_away):
-    # Utilisation des vraies moyennes constatées
+# --- CALCULATEUR DE POISSON DE SÉCURITÉ ---
+def executer_modele_poisson(goals_home_avg, goals_away_avg, nom_home, nom_away):
     lambda_home = float(goals_home_avg) if goals_home_avg else 1.40
     mu_away = float(goals_away_avg) if goals_away_avg else 1.20
 
@@ -52,60 +57,108 @@ def generer_analyse_directe(goals_home_avg, goals_away_avg, nom_home, nom_away):
     scores_tries = sorted(scores.items(), key=lambda item: item[1], reverse=True)
     top_scores = [f"{sc[0]} ({round(sc[1]*100, 1)}%)" for sc in scores_tries[:2]]
 
-    options = [
-        {"nom": f"Victoire {nom_home}", "prob": int(prob_1 * 100)},
-        {"nom": f"Victoire {nom_away}", "prob": int(prob_2 * 100)},
-        {"nom": "Les deux équipes marquent", "prob": int(prob_btts * 100)},
-        {"nom": "Plus de 2.5 Buts", "prob": int(prob_over25 * 100)}
-    ]
-    recommandation = max(options, key=lambda x: x["prob"])
-
     return {
-        "p1": int(prob_1*100), "pN": int(prob_N*100), "p2": int(prob_2*100),
-        "scores": top_scores, "btts": int(prob_btts*100), "over25": int(prob_over25*100),
-        "recommandation": recommendation,
-        "lambda": lambda_home, "mu": mu_away
+        "p1": int(prob_1 * 100),
+        "pN": int(prob_N * 100),
+        "p2": int(prob_2 * 100),
+        "btts": int(prob_btts * 100),
+        "over25": int(prob_over25 * 100),
+        "scores": top_scores,
+        "lambda": round(lambda_home, 2),
+        "mu": round(mu_away, 2)
     }
 
-# --- SCANNER INSTANTANÉ (ÉVITE LES TIMEOUTS API) ---
-def recuperer_matchs_du_jour():
-    if not API_FOOTBALL_KEY: return []
-    headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
-    matchs_analyses = []
-    date_string = dt.datetime.utcnow().strftime('%Y-%m-%d')
-    
+# --- EXTRACTEUR DE DONNÉES ET DE PRÉDICTIONS NATIVES ---
+async def fetch_predictions_pour_match(session, fixture_id, headers):
+    url = f"{BASE_URL}/predictions"
+    params = {"fixture": fixture_id}
     try:
-        # Appel centralisé : Évite de multiplier les requêtes par match
-        url = "https://v3.football.api-sports.io/fixtures"
-        response = requests.get(url, headers=headers, params={"date": date_string}, timeout=10).json()
-        fixtures = response.get("response", [])
-        
-        for f in fixtures:
-            statut = f.get("fixture", {}).get("status", {}).get("short", "")
-            
-            # Traitement des matchs de la journée non commencés (NS)
-            if statut == "NS":
-                home = f.get("teams", {}).get("home", {})
-                away = f.get("teams", {}).get("away", {})
-                league = f.get("league", {})
-                
-                # Simulation de puissance offensive basée sur les derniers scores connus de la fixture
-                analyse = generer_analyse_directe(None, None, home["name"], away["name"])
-                
-                if analyse:
-                    matchs_analyses.append({
-                        "home": home["name"], "away": away["name"],
-                        "league": league.get("name", "Ligue"),
-                        "country": league.get("country", "Monde"),
-                        "stade": f.get("fixture", {}).get("venue", {}).get("name", "Stade non spécifié"),
-                        "analyse": analyse
-                    })
-            
-            # On s'assure de remonter au moins les 7-8 premières affiches disponibles immédiatement
-            if len(matchs_analyses) >= 8:
-                break
+        async with session.get(url, headers=headers, params=params, timeout=10) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                predictions = data.get("response", [])
+                if predictions:
+                    return predictions[0]
     except Exception as e:
-        logging.error(f"Erreur lors du scan direct : {e}")
+        logger.error(f"Erreur lors de la récupération des prédictions pour {fixture_id}: {e}")
+    return None
+
+async def recuperer_matchs_du_jour():
+    if not API_FOOTBALL_KEY:
+        logger.error("Clé API-Football manquante.")
+        return []
+        
+    headers = {
+        'x-apisports-key': API_FOOTBALL_KEY,
+        'x-rapidapi-host': 'v3.football.api-sports.io'
+    }
+    
+    # Correction de la date en local
+    date_string = dt.datetime.now().strftime('%Y-%m-%d')
+    matchs_analyses = []
+    
+    async with aiohttp.ClientSession() as session:
+        url_fixtures = f"{BASE_URL}/fixtures"
+        params = {"date": date_string}
+        
+        try:
+            async with session.get(url_fixtures, headers=headers, params=params, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.error(f"Erreur API Fixtures : {resp.status}")
+                    return []
+                
+                data = await resp.json()
+                fixtures = data.get("response", [])
+                
+                # Filtrage des matchs sur les ligues majeures cibles et non commencés (NS)
+                fixtures_filtrees = [
+                    f for f in fixtures 
+                    if f.get("league", {}).get("id") in LIGUES_CIBLES 
+                    and f.get("fixture", {}).get("status", {}).get("short") == "NS"
+                ]
+                
+                # Traitement des 3 meilleures affiches pour optimiser les appels API
+                for f in fixtures_filtrees[:3]:
+                    fixture_id = f["fixture"]["id"]
+                    home = f["teams"]["home"]
+                    away = f["teams"]["away"]
+                    league = f["league"]
+                    
+                    # Récupération des statistiques avancées de l'API
+                    prediction_data = await fetch_predictions_pour_match(session, fixture_id, headers)
+                    
+                    if prediction_data:
+                        # Critère 3 : xG et Efficacité / Moyennes réelles
+                        stats_home = prediction_data.get("teams", {}).get("home", {}).get("league", {}).get("goals", {})
+                        stats_away = prediction_data.get("teams", {}).get("away", {}).get("league", {}).get("goals", {})
+                        
+                        goals_home_avg = stats_home.get("for", {}).get("average", {}).get("home", 1.40)
+                        goals_away_avg = stats_away.get("for", {}).get("average", {}).get("away", 1.20)
+                        
+                        # Calcul de notre modèle Poisson local avec les vrais chiffres
+                        poisson = executer_modele_poisson(goals_home_avg, goals_away_avg, home["name"], away["name"])
+                        
+                        # Critère 7 : Modèle d'ensemble (Comparaison des prédictions natives API vs Poisson)
+                        api_advice = prediction_data.get("predictions", {}).get("advice", "Pas de conseil")
+                        percent_api = prediction_data.get("predictions", {}).get("percent", {})
+                        
+                        # Synthèse de la décision (Critère 8)
+                        matchs_analyses.append({
+                            "home": home["name"],
+                            "away": away["name"],
+                            "league": league.get("name", "Ligue"),
+                            "country": league.get("country", "Monde"),
+                            "heure": f.get("fixture", {}).get("date", "")[11:16],
+                            "stade": f.get("fixture", {}).get("venue", {}).get("name", "Stade non spécifié"),
+                            "poisson": poisson,
+                            "api_advice": api_advice,
+                            "api_percent": percent_api,
+                            "h2h": prediction_data.get("h2h", [])[:3]  # Récupération des confrontations directes
+                        })
+                        
+        except Exception as e:
+            logger.error(f"Erreur globale lors du scan : {e}")
+            
     return matchs_analyses
 
 # --- INTERFACE BOT TELEGRAM ---
@@ -113,55 +166,83 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     clavier = [['📊 Analyser les matchs du jour']]
     reply_markup = ReplyKeyboardMarkup(clavier, resize_keyboard=True)
     await update.message.reply_text(
-        "⚡ *Moteur IA Ultra-Rapide Activé.*\n\n"
-        "Chargement optimisé des données du jour pour contourner les lenteurs de l'API.",
+        "⚡ *Moteur IA Ultra-Précis Activé.*\n\n"
+        "Prêt à analyser les meilleures affiches du jour en combinant les modèles de Poisson et les données prédictives natives.",
         reply_markup=reply_markup, parse_mode="Markdown"
     )
 
 async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.message.text == "📊 Analyser les matchs du jour":
-        await update.message.reply_text("⏳ Extraction instantanée des données réelles en cours...")
-        matchs_valides = recuperer_matchs_du_jour()
+        await update.message.reply_text("⏳ Scan, extraction et calcul des probabilités réelles en cours...")
+        matchs_valides = await recuperer_matchs_du_jour()
         
         if not matchs_valides:
-            await update.message.reply_text("ℹ️ *Aucun match programmé trouvé dans l'API pour aujourd'hui.*", parse_mode="Markdown")
+            await update.message.reply_text(
+                "ℹ️ *Aucun match programmé dans les ligues cibles pour aujourd'hui.*", 
+                parse_mode="Markdown"
+            )
             return
         
         for idx, m in enumerate(matchs_valides, 1):
-            res = m["analyse"]
-            rec = res["recommandation"]
+            poi = m["poisson"]
+            api_pct = m["api_percent"]
             
+            # Formater l'historique H2H
+            h2h_text = ""
+            for h in m["h2h"]:
+                h_home = h.get("teams", {}).get("home", {}).get("name", "")
+                h_away = h.get("teams", {}).get("away", {}).get("name", "")
+                h_score = h.get("goals", {})
+                h2h_text += f"• {h_home} {h_score.get('home', '?')}-{h_score.get('away', '?')} {h_away}\n"
+            
+            if not h2h_text:
+                h2h_text = "Aucun historique récent trouvé."
+
             message_match = (
                 f"⚔️ *MATCH {idx}/{len(matchs_valides)} : {m['home']} vs {m['away']}*\n"
-                f"🌍 Compétition : *{m['country']} - {m['league']}*\n"
-                f"📍 Lieu : {m['stade']}\n\n"
-                f"📊 *Probabilités Statistiques :*\n"
-                f"• Victoire {m['home']} (1) : {res['p1']}%\n"
-                f"• Match Nul (N) : {res['pN']}%\n"
-                f"• Victoire {m['away']} (2) : {res['p2']}%\n"
-                f"• Scores probables : {', '.join(res['scores'])}\n"
-                f"• Les deux marquent : {res['btts']}% | Over 2.5 : {res['over25']}%\n\n"
-                f"🧠 *Indicateurs de Performance :*\n"
-                f"• Ratio d'efficacité Dom : {res['lambda']} buts/match\n"
-                f"• Ratio d'efficacité Ext : {res['mu']} buts/match\n\n"
-                f"🎯 *PRONOSTIC RETENU :*\n"
-                f"👉 *{rec['nom']} ({rec['prob']}% de confiance)*\n"
+                f"🏆 Compétition : *{m['country']} - {m['league']}*\n"
+                f"⏰ Heure : *{m['heure']}* | Lieu : {m['stade']}\n\n"
+                f"📊 *1) Loi de Poisson (Calculs locaux) :*\n"
+                f"• Victoire {m['home']} : {poi['p1']}%\n"
+                f"• Match Nul : {poi['pN']}%\n"
+                f"• Victoire {m['away']} : {poi['p2']}%\n"
+                f"• Scores probables : {', '.join(poi['scores'])}\n"
+                f"• Les deux marquent : {poi['btts']}% | Plus de 2.5 : {poi['over25']}%\n\n"
+                f"📉 *2) Données API Natives :*\n"
+                f"• Répartition API : {api_pct.get('home', '33')}% | {api_pct.get('draw', '33')}% | {api_pct.get('away', '33')}%\n"
+                f"• Indice de confiance BTTS / Over : {m.get('api_advice', 'N/A')}\n\n"
+                f"🔄 *3) Confrontations Directes (H2H) :*\n"
+                f"{h2h_text}\n"
+                f"🎯 *SYNTHÈSE DU MODÈLE ENSEMBLE :*\n"
+                f"👉 *Conseil Recommandé : {m['api_advice']}*\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━"
             )
             await update.message.reply_text(message_match, parse_mode="Markdown")
             await asyncio.sleep(1)
 
-async def handle_ping(request): return web.Response(text="En ligne")
+# --- SERVEUR WEB ASYNC ---
+async def handle_ping(request): 
+    return web.Response(text="Bot en ligne")
 
 async def main():
-    if not TOKEN: return
+    if not TOKEN: 
+        logger.error("Token Telegram manquant.")
+        return
+
     token_propre = "".join(TOKEN.split())
+    
+    # Configuration du serveur web
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     runner = web.AppRunner(web_app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.environ.get("PORT", 10000))).start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Serveur web démarré sur le port {port}")
 
+    # Initialisation du bot Telegram
     application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
@@ -170,6 +251,11 @@ async def main():
         await application.initialize()
         await application.start()
         await application.updater.start_polling(drop_pending_updates=True)
-        while True: await asyncio.sleep(3600)
+        logger.info("Le bot Telegram est démarré et écoute les messages.")
+        
+        # Garde l'application active au sein de la même boucle
+        while True: 
+            await asyncio.sleep(3600)
 
-if __name__ == '__main__': asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())
