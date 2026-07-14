@@ -25,7 +25,7 @@ TOKEN = nettoyer_variable("TELEGRAM_TOKEN")
 API_FOOTBALL_KEY = nettoyer_variable("API_FOOTBALL_KEY")
 BASE_URL = "https://v3.football.api-sports.io"
 
-# ID des ligues majeures pour cibler uniquement des compétitions fiables
+# ID des ligues majeures pour cibler en priorité les compétitions d'élite
 LIGUES_CIBLES = [39, 61, 140, 135, 78, 2, 3, 848]  # Premier League, Ligue 1, LaLiga, Serie A, Bundesliga, UCL, UEL, Coupe du Monde
 
 def probabilite_poisson(k, laambda):
@@ -93,7 +93,6 @@ async def recuperer_matchs_du_jour():
         'x-rapidapi-host': 'v3.football.api-sports.io'
     }
     
-    # Date du jour dynamique
     date_string = dt.datetime.now().strftime('%Y-%m-%d')
     matchs_analyses = []
     
@@ -110,14 +109,22 @@ async def recuperer_matchs_du_jour():
                 data = await resp.json()
                 fixtures = data.get("response", [])
                 
-                # Filtrage : Matchs non commencés (NS) appartenant à nos ligues cibles
+                # 1. Étape de filtrage : On cherche d'abord les matchs non commencés (NS) des ligues d'élite
                 fixtures_filtrees = [
                     f for f in fixtures 
                     if f.get("league", {}).get("id") in LIGUES_CIBLES 
                     and f.get("fixture", {}).get("status", {}).get("short") == "NS"
                 ]
                 
-                # Limitation aux 3 plus grandes affiches du jour pour préserver le quota d'appels API
+                # 2. Étape de repli : S'il n'y a aucun match d'élite programmé (ex: tard le soir), on prend n'importe quel match disponible
+                if not fixtures_filtrees:
+                    logger.info("Aucun match d'élite trouvé. Élargissement de la recherche à toutes les compétitions disponibles...")
+                    fixtures_filtrees = [
+                        f for f in fixtures 
+                        if f.get("fixture", {}).get("status", {}).get("short") == "NS"
+                    ]
+                
+                # Limitation aux 3 premiers matchs trouvés pour économiser tes requêtes API quotidiennes
                 for f in fixtures_filtrees[:3]:
                     fixture_id = f["fixture"]["id"]
                     home = f["teams"]["home"]
@@ -127,17 +134,14 @@ async def recuperer_matchs_du_jour():
                     prediction_data = await fetch_predictions_pour_match(session, fixture_id, headers)
                     
                     if prediction_data:
-                        # Extraction des moyennes de buts réelles sur la saison en cours (Split Form)
                         stats_home = prediction_data.get("teams", {}).get("home", {}).get("league", {}).get("goals", {})
                         stats_away = prediction_data.get("teams", {}).get("away", {}).get("league", {}).get("goals", {})
                         
                         goals_home_avg = stats_home.get("for", {}).get("average", {}).get("home", 1.40)
                         goals_away_avg = stats_away.get("for", {}).get("average", {}).get("away", 1.20)
                         
-                        # Exécution du modèle de Poisson
                         poisson = executer_modele_poisson(goals_home_avg, goals_away_avg, home["name"], away["name"])
                         
-                        # Récupération des analyses et pourcentages natifs de l'API (Modèle d'ensemble)
                         api_advice = prediction_data.get("predictions", {}).get("advice", "Pas de conseil spécifique")
                         percent_api = prediction_data.get("predictions", {}).get("percent", {})
                         
@@ -176,7 +180,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         
         if not matchs_valides:
             await update.message.reply_text(
-                "ℹ️ *Aucun match majeur programmé trouvé pour aujourd'hui.*", 
+                "ℹ️ *Aucun match programmé trouvé (même dans les ligues secondaires) pour aujourd'hui.*", 
                 parse_mode="Markdown"
             )
             return
@@ -185,7 +189,6 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             poi = m["poisson"]
             api_pct = m["api_percent"]
             
-            # Formatage de l'historique H2H
             h2h_text = ""
             for h in m["h2h"]:
                 h_home = h.get("teams", {}).get("home", {}).get("name", "")
@@ -218,7 +221,7 @@ async def analyser_matchs(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await update.message.reply_text(message_match, parse_mode="Markdown")
             await asyncio.sleep(1)
 
-# --- SERVEUR WEB ASYNC (ÉVITE LE CRASH PORT SUR RENDER) ---
+# --- SERVEUR WEB ASYNC ---
 async def handle_ping(request): 
     return web.Response(text="Bot en ligne")
 
@@ -229,7 +232,6 @@ async def main():
 
     token_propre = "".join(TOKEN.split())
     
-    # Configuration et lancement du serveur web
     web_app = web.Application()
     web_app.router.add_get('/', handle_ping)
     runner = web.AppRunner(web_app)
@@ -240,7 +242,6 @@ async def main():
     await site.start()
     logger.info(f"Serveur web démarré sur le port {port}")
 
-    # Initialisation de l'application Telegram
     application = Application.builder().token(token_propre).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, analyser_matchs))
